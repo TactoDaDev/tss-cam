@@ -86,9 +86,13 @@ function __require(name) -- the extension's require (run_tests.py renames it in 
   error("unexpected require " .. tostring(name))
 end
 
+local uiShown = true
+ui_visibility = { get = function() return uiShown end, set = function(b) uiShown = b end }
+
 local ext = realRequire("./.build_ext")({ __require = __require, ui_imgui = ui_imgui, vec3 = vec3, quatFromDir = quatFromDir,
   ui_message = ui_message, jsonReadFile = jsonReadFile, jsonWriteFile = jsonWriteFile, castRayStatic = castRayStatic,
-  GFXDevice = GFXDevice, core_vehicle_manager = core_vehicle_manager, core_camera = core_camera, log = log, socket = socket })
+  GFXDevice = GFXDevice, core_vehicle_manager = core_vehicle_manager, core_camera = core_camera, log = log, socket = socket,
+  ui_visibility = ui_visibility })
 tssHandcam = ext
 ext.onExtensionLoaded()
 
@@ -187,6 +191,21 @@ d = carFrame()
 check(near(d.res.pos.x - carPos.x, -onCar.y, 1e-3) and near(d.res.pos.y - carPos.y, onCar.x, 1e-3), "riding: the camera turns with the car")
 check(near(d.res.rot.dir.x, -1, 1e-3), "riding: and so does its view")
 ext.release()
+active = nil
+
+-- film clean: one key starts filming and hides the UI, the next stops and brings it back
+ext.toggleClean()
+check(active == "tssHandcam" and uiShown == false, "film clean: filming, UI hidden")
+ext.toggleClean()
+check(active == nil and uiShown == true, "film clean again: released, UI back")
+uiShown = false -- UI already hidden by the player: filming clean and stopping leaves it hidden
+ext.toggleClean() ext.toggleClean()
+check(uiShown == false, "film clean: a UI the player hid stays hidden")
+uiShown = true
+ext.toggleClean()
+active = "free" -- the player picks another camera while filming clean
+ext.onUpdate(1 / 60)
+check(uiShown == true and not ext.isEngaged(), "another camera picked: UI back")
 active = nil
 
 -- settings were saved after a change

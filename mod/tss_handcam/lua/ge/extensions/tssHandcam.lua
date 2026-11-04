@@ -418,6 +418,7 @@ end
 function M.release()
   if not engaged then return end
   engaged = false
+  M.restoreUi()
   local last = lastWorld
   if prevGlobal then
     core_camera.setGlobalCameraByName(prevGlobal)
@@ -435,6 +436,25 @@ function M.release()
 end
 
 function M.toggle() if engaged then M.release() else M.engage() end end
+
+-- film clean: filming with the HUD and every ImGui window hidden (the game's own Alt+U, ui/visibility.lua), and
+-- everything back when filming stops. Only what we hid comes back: if the UI was already off, it stays off.
+local hidUi = false
+function M.toggleClean()
+  if engaged then
+    M.release()
+  else
+    M.engage()
+    if engaged and ui_visibility and ui_visibility.get() then
+      ui_visibility.set(false)
+      hidUi = true
+    end
+  end
+end
+function M.restoreUi() -- called whenever filming stops
+  if hidUi and ui_visibility then ui_visibility.set(true) end
+  hidUi = false
+end
 function M.recenter() recenterRequests = (recenterRequests + 1) % 4294967296 end -- the receiver recenters, we re-anchor
 function M.freeze()
   frozen = not frozen
@@ -529,6 +549,7 @@ local function onUpdate(dtReal)
   updateSample(dt)
   if engaged and core_camera.getActiveGlobalCameraName() ~= CAM_NAME then
     engaged = false -- another camera was picked: leave the game in it
+    M.restoreUi()
     message('TSS Handcam: released (another camera was picked)')
   end
   if not engaged then fps = fps + (1 / dt - fps) * 0.05 end
