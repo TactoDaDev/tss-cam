@@ -1,0 +1,536 @@
+-- TSS Handcam: your phone as a handheld camera in BeamNG.
+--
+-- phone (AcHandCam app, ARKit/ARCore) --UDP--> AcHandCam PC receiver (Python, unchanged)
+--   --shared memory--> this extension --> the "tssHandcam" global camera mode
+--   (lua/ge/extensions/core/cameraModes/tssHandcam.lua), drawn every frame by core/cameraUpdate.lua.
+--
+-- The receiver was written for Assetto Corsa (github.com/jxrdxn011/AcHandcam, MIT). It publishes the phone's
+-- pose in three named session-local file mappings (receiver/handheld_receiver/shm.py): Pose (it writes), Status
+-- and View (the game writes; it reads them for recenter requests and to timewarp the phone's live view).
+-- BeamNG's LuaJIT reaches them through ffi.C (kernel32: OpenFileMappingA / MapViewOfFile).
+--
+-- Camera: a global camera mode (isGlobal) is updated right before rendering with the frame's vehicle data, so a
+-- camera riding with a car (follow-car) is placed with that frame's car pose (no lag). Vertical FOV, as every
+-- BeamNG camera mode (core/cameraModes/gameengine.lua: "Camera modes choose the base vertical FOV").
+local M = {}
+M.dependencies = { 'ui_imgui' }
+
+local im = ui_imgui
+local rig = require('tssHandcam/rig')
+local v = rig.v
+
+local CAM_NAME = 'tssHandcam'
+local SETTINGS = '/settings/tss_handcam.json'
+local NAMES = { -- the receiver's defaults (config.py)
+  pose = 'AcTools.CSP.Limited.HandheldCam.Pose',
+  status = 'AcTools.CSP.Limited.HandheldCam.Status',
+  view = 'AcTools.CSP.Limited.HandheldCam.View',
+}
+local POSE_MAGIC, POSE_VERSION = 0x31434D48, 3
+local STATUS_MAGIC, STATUS_VERSION = 0x31534D48, 1
+local VIEW_MAGIC, VIEW_VERSION = 0x31564D48, 2
+local MODE_WALK = 1
+local STATE_NAMES = {
+  [0] = 'waiting for the phone', [1] = 'live', [2] = 'holding (tracking lost)', [3] = 'frozen (phone/receiver)',
+  [4] = 'paused', [5] = 'holding (no packets)', [6] = 'playing a recorded path',
+}
+local RECEIVER_TIMEOUT = 1.0 -- s without a new heartbeat: the receiver isn't running
+local STICK_TIMEOUT = 0.3    -- s without fresh data: the joystick counts as released
+local MIN_CLEARANCE = 0.15   -- m: the camera never goes closer than this to the ground
+
+local defaults = {
+  fov = 46,             -- vertical FOV at 1x for phone apps that don't send their screen shape
+  zoomFromPhone = true,
+  smoothing = 0.03,     -- s, on top of the receiver's own filtering
+  blendBack = 0.5,      -- s, blend back to the game's camera on release
+  followCar = false,    -- ride with the player's car (in-car / chase shots)
+  followTilt = true,    -- ...and pitch and roll with it
+  walkSpeed = 1.6,      -- m/s at full stick (walk mode)
+  walkSmoothing = 0.35, -- s
+  headBob = 1,          -- 0 off, 1 subtle, 2 strong
+  terrainAlways = false, -- keep above the ground in handheld mode too (walk mode always does)
+}
+local cfg = {}
+
+-- ------------------------------------------------------------ shared memory
+local ffi, C = nil, nil
+local function initFfi()
+  if ffi then return true end
+  local ok, f = pcall(require, 'ffi')
+  if not ok then return false end
+  ffi = f
+  -- each on its own: after a Lua reload they are already declared, and ffi.cdef refuses to redeclare
+  for _, decl in ipairs({
+    'typedef struct { uint32_t magic, version, seqBegin, heartbeat; int32_t outState; uint32_t flags, generation, trackingState; '
+      .. 'float px, py, pz, fx, fy, fz, ux, uy, uz, latencyMs, rxHz, lossPct, zoom, joyX, joyY; '
+      .. 'uint32_t mode, viewOrientation; float vfAspect; uint32_t seqEnd; } tsshc_pose;',
+    'typedef struct { uint32_t magic, version, heartbeat, engaged, grabbed, lastGeneration, appliedCount; int32_t errorCode; '
+      .. 'float fps, lookSign, sideSign; uint32_t recenterRequests; } tsshc_status;',
+    'typedef struct { uint32_t magic, version, frame, live; float fovV, smoothing; uint32_t poseHeartbeat, hasRot; '
+      .. 'float rx, ry, rz, rw; } tsshc_view;',
+    'void* OpenFileMappingA(uint32_t access, int inherit, const char* name);',
+    'void* MapViewOfFile(void* mapping, uint32_t access, uint32_t offsetHigh, uint32_t offsetLow, size_t bytes);',
+    'int UnmapViewOfFile(const void* p);',
+    'int CloseHandle(void* h);',
+  }) do pcall(ffi.cdef, decl) end
+  C = ffi.C
+  return true
+end
+
+local FILE_MAP_WRITE, FILE_MAP_READ = 0x2, 0x4
+local maps = {} -- name -> {h, p (typed pointer)}
+
+-- Opens a mapping the receiver created (never creates one: no receiver, nothing to talk to).
+local function openMap(key, ctype, size, access)
+  if maps[key] then return maps[key].p end
+  if not initFfi() then return nil end
+  local ok, res = pcall(function()
+    local h = C.OpenFileMappingA(access, 0, 'Local\\' .. NAMES[key])
+    if h == nil then return nil end
+    local p = C.MapViewOfFile(h, access, 0, 0, size)
+    if p == nil then C.CloseHandle(h) return nil end
+    return { h = h, p = ffi.cast(ctype .. '*', p) }
+  end)
+  if ok and res then maps[key] = res return res.p end
+  return nil
+end
+
+local function closeMaps()
+  for k, m in pairs(maps) do
+    pcall(function() C.UnmapViewOfFile(m.p) C.CloseHandle(m.h) end)
+    maps[k] = nil
+  end
+end
+
+-- ------------------------------------------------------------------- state
+local sample = nil            -- last good pose {p, f, u (BeamNG order), state, zoom, joyX, joyY, mode, heartbeat, ...}
+local lastHeartbeat, heartbeatAge = -1, 99
+local lastGeneration = -1
+local engaged, frozen = false, false
+local prevGlobal = nil        -- the global camera before we took over (nil = the vehicle's camera)
+local orig = nil              -- the game's view when we took over (world)
+local rigF, rigMode = rig.WORLD, nil
+local anchor, anchor0 = nil, nil
+local needAnchor = true
+local cur, curFov = nil, nil  -- shown pose (rig frame) and FOV
+local lastWorld = nil         -- last pose drawn (world), handed to the free camera on release
+local walkVel, bobPhase, walking = v(0, 0, 0), 0, false
+local groundPrev, groundRaw, terrainWas = nil, nil, false
+local tempSmooth, tempSmoothTime = 0, 0
+local effectiveSmoothing = 0
+local fps, appliedCount, statusBeat, viewFrame, recenterRequests = 60, 0, 0, 0, 0
+local errorText = ''
+local windowOpen = im.BoolPtr(false)
+local autoOpened = false
+local dirty, dirtyTime = false, 0
+
+local function message(text) ui_message(text, 4, 'tssHandcam') end
+
+-- --------------------------------------------------------------- settings
+local function loadSettings()
+  local s = jsonReadFile(SETTINGS) or {}
+  for k, d in pairs(defaults) do
+    if type(s[k]) == type(d) then cfg[k] = s[k] else cfg[k] = d end
+  end
+end
+local function saveSettings() jsonWriteFile(SETTINGS, cfg, true) dirty = false end
+local function changed() dirty, dirtyTime = true, 1 end
+
+-- ------------------------------------------------------------------ reading
+local function readPose()
+  local p = openMap('pose', 'tsshc_pose', 108, FILE_MAP_READ)
+  if not p then return nil end
+  local e = p.seqEnd
+  local s = {
+    magic = p.magic, version = p.version, heartbeat = p.heartbeat, state = p.outState, generation = p.generation,
+    p = rig.fromFilm(p.px, p.py, p.pz), f = rig.fromFilm(p.fx, p.fy, p.fz), u = rig.fromFilm(p.ux, p.uy, p.uz),
+    latency = p.latencyMs, rxHz = p.rxHz, loss = p.lossPct,
+    zoom = p.zoom, joyX = p.joyX, joyY = p.joyY, mode = p.mode, portrait = p.viewOrientation == 1, vfAspect = p.vfAspect,
+  }
+  if p.seqBegin ~= e or s.magic ~= POSE_MAGIC or s.version ~= POSE_VERSION then return nil end -- torn or not ours
+  if not (s.zoom == s.zoom and s.zoom > 0) then s.zoom = 1 end
+  if not (s.joyX == s.joyX and s.joyY == s.joyY) then s.joyX, s.joyY = 0, 0 end
+  return s, s.state ~= 0 and rig.validSample(s)
+end
+
+local function updateSample(dt)
+  local s, valid = readPose()
+  if not s then heartbeatAge = heartbeatAge + dt return end
+  if s.heartbeat ~= lastHeartbeat then lastHeartbeat, heartbeatAge = s.heartbeat, 0 else heartbeatAge = heartbeatAge + dt end
+  if valid then
+    if s.generation ~= lastGeneration then
+      if lastGeneration ~= -1 then needAnchor = true end -- the receiver re-anchored (recenter, tracking back)
+      lastGeneration = s.generation
+    end
+    if not frozen or not sample then
+      sample = s
+    else -- frozen: hold the pose; zoom, mode and the stick still follow the phone
+      sample.zoom, sample.mode, sample.joyX, sample.joyY = s.zoom, s.mode, s.joyX, s.joyY
+      sample.state, sample.rxHz, sample.loss, sample.latency = s.state, s.rxHz, s.loss, s.latency
+    end
+    if not autoOpened and s.state == 1 then autoOpened = true windowOpen[0] = true end -- the phone just connected
+  elseif sample then
+    sample.state, sample.joyX, sample.joyY = s.state, 0, 0
+  end
+end
+
+local function receiverUp() return maps.pose ~= nil and heartbeatAge < RECEIVER_TIMEOUT end
+
+-- ------------------------------------------------------------------ writing
+local function writeStatus()
+  if not maps.pose then return end -- no receiver: nothing to open (it creates all three)
+  local st = openMap('status', 'tsshc_status', 48, FILE_MAP_WRITE)
+  if not st then return end
+  statusBeat = (statusBeat + 1) % 4294967296
+  st.magic, st.version, st.heartbeat = STATUS_MAGIC, STATUS_VERSION, statusBeat
+  st.engaged = engaged and 1 or 0
+  st.grabbed = engaged and 1 or 0
+  st.lastGeneration = math.max(0, lastGeneration)
+  st.appliedCount = appliedCount % 4294967296
+  st.errorCode = errorText ~= '' and 3 or 0
+  st.fps = fps
+  st.lookSign, st.sideSign = 1, 1
+  st.recenterRequests = recenterRequests
+end
+
+-- what the receiver needs to timewarp the phone's live view: the pose this frame was drawn from, the FOV, and the
+-- rotation from that pose's view to the one drawn (smoothing, head bob)
+local function writeView(live, fov, poseHeartbeat, rot)
+  if not maps.pose then return end
+  local vw = openMap('view', 'tsshc_view', 48, FILE_MAP_WRITE)
+  if not vw then return end
+  viewFrame = (viewFrame + 1) % 4294967296
+  vw.magic, vw.version, vw.frame = VIEW_MAGIC, VIEW_VERSION, viewFrame
+  vw.live = live and 1 or 0
+  vw.fovV, vw.smoothing = fov or cfg.fov, effectiveSmoothing
+  vw.poseHeartbeat = poseHeartbeat or 0
+  if rot and rot[4] == rot[4] then
+    vw.hasRot, vw.rx, vw.ry, vw.rz, vw.rw = 1, rot[1], rot[2], rot[3], rot[4]
+  else
+    vw.hasRot = 0
+  end
+end
+
+-- ------------------------------------------------------------------ camera
+local function t3(a) return v(a.x, a.y, a.z) end
+
+local function gameAspect()
+  local ok, a = pcall(function() local vm = GFXDevice.getVideoMode() return vm.width / vm.height end)
+  if ok and a and a == a and a > 0.2 and a < 10 then return a end
+  return 16 / 9
+end
+
+local function isUnicycle(vid)
+  local d = vid and core_vehicle_manager and core_vehicle_manager.getVehicleData(vid)
+  return d ~= nil and d.mainPartName == 'unicycle'
+end
+
+-- the rig this frame: the world, or the player's car with this frame's pose (on foot there is no car to ride)
+local function currentRig(data)
+  if not cfg.followCar then return rig.WORLD, 'world' end
+  local veh = data.veh
+  if not veh or veh == 0 or isUnicycle(data.vid) then return rig.WORLD, 'world' end
+  local fwd, up = t3(veh:getDirectionVector()), t3(veh:getDirectionVectorUp())
+  if not cfg.followTilt then
+    fwd = rig.horizontal(fwd) or rig.Y
+    up = rig.Z
+  end
+  return rig.frame(t3(data.vehPos), fwd, up), 'car'
+end
+
+local function buildAnchor()
+  local cp, cl, cu
+  if cur then
+    cp, cl, cu = cur.pos, cur.look, cur.up
+  else
+    cp, cl, cu = rig.fromWorld(rigF, orig.pos), rig.fromWorldDir(rigF, orig.look), rig.fromWorldDir(rigF, orig.up)
+  end
+  anchor = rig.makeAnchor(cp, cl, cu, sample)
+  if not anchor0 then anchor0 = { pos = anchor.pos, fwd = anchor.fwd, mode = rigMode } end
+  groundPrev = nil
+  needAnchor = false
+end
+
+-- ground height under (x, y): rays only reach down from a little above the last ground, so the camera climbs
+-- kerbs and slopes but never jumps onto a roof or bridge overhead
+local function groundAt(x, y, refZ, stepUp)
+  local len = stepUp + 100
+  local ok, d = pcall(castRayStatic, vec3(x, y, refZ + stepUp), vec3(0, 0, -1), len)
+  if not ok or not d or d >= len then return nil end
+  return refZ + stepUp - d
+end
+
+-- walk mode (and optionally handheld): keep the same height above the ground over hills and kerbs, never below it
+local function followTerrain(tpos, dt)
+  if rigMode ~= 'world' then return tpos end
+  local active = (sample.mode == MODE_WALK) or cfg.terrainAlways
+  if active ~= terrainWas then groundPrev = nil end
+  terrainWas = active
+  if not active then return tpos end
+  local g = groundAt(tpos.x, tpos.y, groundPrev or (tpos.z - 0.3), groundPrev and 2.0 or 0.6)
+  groundRaw = g
+  if not g then return tpos end
+  local gF = groundPrev and (groundPrev + (g - groundPrev) * rig.smoothK(dt, 0.08)) or g
+  if groundPrev and gF ~= groundPrev then
+    local dz = v(0, 0, gF - groundPrev)
+    anchor.pos, tpos = rig.add(anchor.pos, dz), rig.add(tpos, dz)
+  end
+  groundPrev = gF
+  if tpos.z < g + MIN_CLEARANCE then
+    local lift = v(0, 0, g + MIN_CLEARANCE - tpos.z)
+    anchor.pos, tpos = rig.add(anchor.pos, lift), rig.add(tpos, lift)
+  end
+  return tpos
+end
+
+local function setRes(data, pos, look, up, fov)
+  data.res.pos:set(pos.x, pos.y, pos.z)
+  data.res.targetPos:set(pos.x + look.x * 5, pos.y + look.y * 5, pos.z + look.z * 5)
+  data.res.rot = quatFromDir(vec3(look.x, look.y, look.z), vec3(up.x, up.y, up.z))
+  data.res.fov = fov
+  lastWorld = { pos = pos, look = look, up = up, fov = fov }
+end
+
+-- Called by the camera mode every frame while it is the active global camera. Returning false hands the view
+-- back to the game (core/cameraUpdate.lua clears the global camera).
+function M.cameraUpdate(data)
+  if not engaged then return false end
+  local dt = math.max(1e-4, data.dtReal or data.dt or 1 / 60)
+  fps = fps + (1 / dt - fps) * 0.05
+
+  local F, mode = currentRig(data)
+  if rigMode ~= nil and mode ~= rigMode then
+    -- follow-car switched on or off while filming: carry the view over unchanged
+    if cur then
+      cur.pos = rig.fromWorld(F, rig.toWorld(rigF, cur.pos))
+      cur.look = rig.fromWorldDir(F, rig.toWorldDir(rigF, cur.look))
+      cur.up = rig.fromWorldDir(F, rig.toWorldDir(rigF, cur.up))
+    end
+    needAnchor, anchor0, groundPrev = true, nil, nil
+  end
+  rigF, rigMode = F, mode
+
+  if not sample then -- nothing from the phone yet: keep the game's view
+    setRes(data, orig.pos, orig.look, orig.up, orig.fov)
+    writeView(false, orig.fov)
+    return true
+  end
+  if needAnchor then buildAnchor() end
+
+  -- walk mode: the phone's shutter becomes a joystick that moves the whole rig, easing in and out
+  local target = v(0, 0, 0)
+  if sample.mode == MODE_WALK and not frozen and cur and heartbeatAge < STICK_TIMEOUT then
+    target = rig.walkVelocity(cur.look, cur.up, sample.joyX, sample.joyY, cfg.walkSpeed)
+  end
+  if frozen or not cur then
+    walkVel = v(0, 0, 0)
+  else
+    walkVel = rig.approach(walkVel, target, dt, cfg.walkSmoothing, cfg.walkSmoothing * 0.7)
+  end
+  local speed = rig.len(walkVel)
+  walking = speed > 0.05
+  if speed > 0 then
+    anchor.pos = rig.add(anchor.pos, rig.scale(walkVel, dt))
+    bobPhase = (bobPhase + 2 * math.pi * rig.cadence(speed) * dt) % (4 * math.pi)
+  end
+
+  local tpos, tlook, tup = rig.toRig(anchor, sample)
+  tpos = followTerrain(tpos, dt)
+
+  local targetFov = cfg.fov
+  if cfg.zoomFromPhone then
+    if (sample.vfAspect or 0) > 0 then
+      targetFov = rig.fovForView(24 * sample.zoom, sample.vfAspect, sample.portrait, gameAspect())
+    else
+      targetFov = rig.fovForZoom(cfg.fov, sample.zoom)
+    end
+  end
+  curFov = curFov and (curFov + (targetFov - curFov) * rig.smoothK(dt, 0.12)) or orig.fov
+
+  if not cur then
+    cur = { pos = tpos, look = tlook, up = tup }
+  elseif not frozen then
+    local tau = cfg.smoothing
+    if tempSmoothTime > 0 then
+      tempSmoothTime = tempSmoothTime - dt
+      tau = math.max(tau, tempSmooth)
+    end
+    effectiveSmoothing = tau
+    local k = rig.smoothK(dt, tau)
+    cur.pos = rig.lerp(cur.pos, tpos, k)
+    cur.look, cur.up = rig.orthonormal(rig.lerp(cur.look, tlook, k), rig.lerp(cur.up, tup, k))
+  end
+
+  -- head bob while walking: added to what is shown, never to the rig
+  local showPos, showUp = cur.pos, cur.up
+  if speed > 0 and cfg.headBob > 0 then
+    local up, side, roll = rig.headBob(bobPhase, speed, cfg.headBob)
+    local right = rig.rightOf(rig.headingOf(cur.look, cur.up))
+    showPos = rig.add(cur.pos, rig.add(v(0, 0, up), rig.scale(right, side)))
+    showUp = rig.normalize(rig.add(rig.scale(cur.up, math.cos(roll)), rig.scale(rig.cross(cur.look, cur.up), math.sin(roll))), cur.up)
+  end
+
+  setRes(data, rig.toWorld(rigF, showPos), rig.toWorldDir(rigF, cur.look), rig.toWorldDir(rigF, showUp), curFov)
+  appliedCount = appliedCount + 1
+  writeView(not frozen and sample.state == 1, curFov, sample.heartbeat, { rig.viewRotation(tlook, tup, cur.look, showUp) })
+  return true
+end
+
+-- ------------------------------------------------------------------ control
+function M.engage()
+  if engaged then return end
+  if not (core_camera and core_camera.getGlobalCameras and core_camera.getGlobalCameras()[CAM_NAME]) then
+    errorText = 'camera mode missing: restart the game with the mod enabled'
+    message('TSS Handcam: ' .. errorText)
+    return
+  end
+  prevGlobal = core_camera.getActiveGlobalCameraName()
+  orig = {
+    pos = t3(core_camera.getPosition()), look = t3(core_camera.getForward()), up = t3(core_camera.getUp()),
+    fov = core_camera.getFovDeg() or cfg.fov,
+  }
+  if not (orig.fov > 1) then orig.fov = cfg.fov end
+  rigF, rigMode, anchor, anchor0, needAnchor = rig.WORLD, nil, nil, nil, true
+  cur, curFov, frozen = nil, nil, false
+  walkVel, bobPhase, groundPrev = v(0, 0, 0), 0, nil
+  errorText = ''
+  engaged = true
+  core_camera.setGlobalCameraByName(CAM_NAME)
+  if core_camera.getActiveGlobalCameraName() ~= CAM_NAME then
+    engaged = false
+    errorText = 'the game refused the camera'
+    message('TSS Handcam: ' .. errorText)
+    return
+  end
+  message(receiverUp() and 'TSS Handcam: filming' or 'TSS Handcam: filming (start the AcHandCam receiver and the phone app)')
+end
+
+function M.release()
+  if not engaged then return end
+  engaged = false
+  local last = lastWorld
+  if prevGlobal then
+    core_camera.setGlobalCameraByName(prevGlobal)
+  else
+    core_camera.setGlobalCameraByName(nil)
+    if core_camera.getActiveGlobalCameraName() == CAM_NAME then core_camera.setGlobalCameraByName('free') prevGlobal = 'free' end
+  end
+  if prevGlobal == 'free' and last then -- the free camera carries on from where the phone left it
+    core_camera.globalCameraFunction('free', 'setPosition', vec3(last.pos.x, last.pos.y, last.pos.z))
+    core_camera.globalCameraFunction('free', 'setRotation', quatFromDir(vec3(last.look.x, last.look.y, last.look.z), vec3(last.up.x, last.up.y, last.up.z)))
+  elseif cfg.blendBack > 0 then
+    core_camera.startCameraTransition(cfg.blendBack)
+  end
+  message('TSS Handcam: camera back to the game')
+end
+
+function M.toggle() if engaged then M.release() else M.engage() end end
+function M.recenter() recenterRequests = (recenterRequests + 1) % 4294967296 end -- the receiver recenters, we re-anchor
+function M.freeze()
+  frozen = not frozen
+  if not frozen then needAnchor = true end
+end
+function M.backToStart()
+  if anchor0 and anchor0.mode == rigMode then
+    anchor = { pos = anchor0.pos, fwd = anchor0.fwd }
+    groundPrev = nil
+    tempSmooth, tempSmoothTime = 0.35, 1.5 -- glide back instead of cutting
+  end
+end
+function M.toggleFollow() cfg.followCar = not cfg.followCar changed() end
+function M.toggleWindow() windowOpen[0] = not windowOpen[0] end
+function M.isEngaged() return engaged end
+
+-- --------------------------------------------------------------------- UI
+local col = { ok = im.ImVec4(0.35, 0.9, 0.45, 1), warn = im.ImVec4(1, 0.72, 0.2, 1), bad = im.ImVec4(1, 0.38, 0.32, 1), dim = im.ImVec4(0.65, 0.68, 0.72, 1) }
+local ptr = {}
+local function slider(key, label, lo, hi, fmt)
+  ptr[key] = ptr[key] or im.FloatPtr(cfg[key])
+  ptr[key][0] = cfg[key]
+  if im.SliderFloat(label, ptr[key], lo, hi, fmt) then cfg[key] = ptr[key][0] changed() end
+end
+local bptr = {}
+local function checkbox(key, label)
+  bptr[key] = bptr[key] or im.BoolPtr(cfg[key])
+  bptr[key][0] = cfg[key]
+  if im.Checkbox(label, bptr[key]) then cfg[key] = bptr[key][0] changed() end
+end
+
+local function stateLine()
+  if not maps.pose then return 'Receiver not found: start AcHandCam\'s run_receiver.bat', col.bad end
+  if heartbeatAge > RECEIVER_TIMEOUT then return 'Receiver not responding', col.bad end
+  if not sample then return 'Receiver running: waiting for the phone', col.warn end
+  if frozen then return 'Frozen (in game)', col.warn end
+  local st = sample.state or 0
+  return 'Phone: ' .. (STATE_NAMES[st] or ('state ' .. st)), (st == 1 or st == 6) and col.ok or col.warn
+end
+
+local function drawWindow()
+  im.SetNextWindowSize(im.ImVec2(430, 520), im.Cond_FirstUseEver)
+  if im.Begin('TSS Handcam', windowOpen) then
+    local text, c = stateLine()
+    im.TextColored(c, '%s', text)
+    if sample and sample.rxHz then
+      im.TextColored(col.dim, '%s', string.format('%.0f Hz, loss %.1f%%, latency %s   %s %s  zoom %.1fx  FOV %.0f',
+        sample.rxHz, sample.loss or 0, (sample.latency and sample.latency >= 0) and string.format('%.0f ms', sample.latency) or 'n/a',
+        sample.mode == MODE_WALK and 'WALK' or 'HANDHELD', walking and '(moving)' or '', sample.zoom or 1, curFov or cfg.fov))
+    end
+    if errorText ~= '' then im.TextColored(col.bad, '%s', errorText) end
+    im.Separator()
+    if im.Button(engaged and 'Release camera' or 'Film with the phone') then M.toggle() end
+    im.SameLine()
+    if im.Button('Recenter') then M.recenter() end
+    im.SameLine()
+    if im.Button(frozen and 'Unfreeze' or 'Freeze') then M.freeze() end
+    im.SameLine()
+    if im.Button('Back to start') then M.backToStart() end
+    im.Separator()
+    checkbox('followCar', 'Ride with my car (in-car and chase shots)')
+    if cfg.followCar then checkbox('followTilt', '   ...and tilt with it') end
+    checkbox('zoomFromPhone', 'Zoom from the phone')
+    slider('fov', '1x FOV (older phone apps)', 20, 90, '%.0f deg')
+    slider('walkSpeed', 'Walk speed', 0.2, 8, '%.1f m/s')
+    slider('walkSmoothing', 'Walk start/stop', 0, 1.5, '%.2f s')
+    slider('headBob', 'Head bob', 0, 2, '%.1f')
+    checkbox('terrainAlways', 'Stay above the ground when not walking')
+    slider('smoothing', 'Extra smoothing', 0, 0.3, '%.3f s')
+    slider('blendBack', 'Blend back to the game', 0, 2, '%.2f s')
+    im.Separator()
+    im.TextColored(col.dim, '%s', 'Keys: Options > Controls > "TSS Handcam" (film, recenter, freeze, window).')
+  end
+  im.End()
+end
+
+-- ------------------------------------------------------------------ hooks
+local function onUpdate(dtReal)
+  local dt = math.max(1e-4, dtReal or 1 / 60)
+  if not maps.pose then
+    M._retry = (M._retry or 0) - dt
+    if M._retry <= 0 then M._retry = 1 openMap('pose', 'tsshc_pose', 108, FILE_MAP_READ) end
+  end
+  updateSample(dt)
+  if engaged and core_camera.getActiveGlobalCameraName() ~= CAM_NAME then
+    engaged = false -- another camera was picked: leave the game in it
+    message('TSS Handcam: released (another camera was picked)')
+  end
+  if not engaged then fps = fps + (1 / dt - fps) * 0.05 end
+  writeStatus()
+  if dirty then
+    dirtyTime = dirtyTime - dt
+    if dirtyTime <= 0 then saveSettings() end
+  end
+  if windowOpen[0] then drawWindow() end
+end
+
+local function onExtensionLoaded() loadSettings() end
+local function onExtensionUnloaded()
+  if engaged then M.release() end
+  if dirty then saveSettings() end
+  closeMaps()
+end
+
+M.onUpdate = onUpdate
+M.onExtensionLoaded = onExtensionLoaded
+M.onExtensionUnloaded = onExtensionUnloaded
+
+return M
