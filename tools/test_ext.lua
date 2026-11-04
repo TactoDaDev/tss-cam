@@ -49,23 +49,37 @@ core_camera = {
   globalCameraFunction = function() end,
 }
 
--- ---- the fake receiver: three mappings as plain tables
+-- ---- the fake receiver + bridge: the receiver's blocks as plain tables; a "packet" is a table copy whose # is its
+-- byte size, and the fake ffi copies fields where the real one copies bytes
 local mem = { pose = { magic = 0x31434D48, version = 3, seqBegin = 1, seqEnd = 1, heartbeat = 1, outState = 1, generation = 1,
   px = 0, py = 1.5, pz = 0, fx = 0, fy = 0, fz = 1, ux = 0, uy = 1, uz = 0, latencyMs = 20, rxHz = 60, lossPct = 0,
   zoom = 1, joyX = 0, joyY = 0, mode = 0, viewOrientation = 0, vfAspect = 0 }, status = {}, view = {} }
+local function packet(t, size)
+  local c = {}
+  for k, x in pairs(t) do c[k] = x end
+  return setmetatable(c, { __len = function() return size end })
+end
+local inbox = {}
+local function push() table.insert(inbox, packet(mem.pose, 108)) end -- the bridge forwards the receiver's pose
 local fakeFfi = {
   cdef = function() end,
-  cast = function(_, p) return p end,
-  C = {
-    OpenFileMappingA = function(_, _, name)
-      for k in pairs(mem) do if name:find(k:sub(1, 1):upper() .. k:sub(2), 1, true) then return k end end
-      return nil
-    end,
-    MapViewOfFile = function(h) return mem[h] end,
-    UnmapViewOfFile = function() return 1 end,
-    CloseHandle = function() return 1 end,
-  },
+  new = function() return {} end,
+  sizeof = function() return 48 end,
+  copy = function(dst, src) for k, x in pairs(src) do dst[k] = x end end,
+  string = function(buf, size) return packet(buf, size) end,
 }
+socket = { udp = function()
+  return {
+    setsockname = function(_, host, port) assert(host == "127.0.0.1" and port == 47830) return 1 end,
+    settimeout = function() end,
+    close = function() end,
+    receive = function() return table.remove(inbox, 1) end,
+    sendto = function(_, p, host, port)
+      assert(host == "127.0.0.1" and port == 47831 and #p == 48)
+      if p.magic == 0x31534D48 then mem.status = p elseif p.magic == 0x31564D48 then mem.view = p end
+    end,
+  }
+end }
 function __require(name) -- the extension's require (run_tests.py renames it in tools/.build_ext.lua)
   if name == "ffi" then return fakeFfi end
   if name == "tssHandcam/rig" then return rig end
@@ -74,11 +88,11 @@ end
 
 local ext = realRequire("./.build_ext")({ __require = __require, ui_imgui = ui_imgui, vec3 = vec3, quatFromDir = quatFromDir,
   ui_message = ui_message, jsonReadFile = jsonReadFile, jsonWriteFile = jsonWriteFile, castRayStatic = castRayStatic,
-  GFXDevice = GFXDevice, core_vehicle_manager = core_vehicle_manager, core_camera = core_camera, log = log })
+  GFXDevice = GFXDevice, core_vehicle_manager = core_vehicle_manager, core_camera = core_camera, log = log, socket = socket })
 tssHandcam = ext
 ext.onExtensionLoaded()
 
-local function beat() mem.pose.heartbeat = mem.pose.heartbeat + 1 mem.pose.seqBegin = mem.pose.seqBegin + 1 mem.pose.seqEnd = mem.pose.seqBegin end
+local function beat() mem.pose.heartbeat = mem.pose.heartbeat + 1 mem.pose.seqBegin = mem.pose.seqBegin + 1 mem.pose.seqEnd = mem.pose.seqBegin push() end
 local function frame()
   beat()
   ext.onUpdate(1 / 60)
@@ -138,6 +152,7 @@ mem.pose.mode, mem.pose.joyY = 0, 0
 local yT = d.res.pos.y
 ext.onUpdate(1 / 60) -- settle
 mem.pose.pz, mem.pose.seqBegin = 50, mem.pose.seqBegin + 7 -- writer mid-update
+push()
 ext.onUpdate(1 / 60)
 d = { dtReal = 1 / 60, veh = 0, vid = 0, vehPos = vec3(), res = { pos = vec3(), targetPos = vec3(), fov = 60 } }
 ext.cameraUpdate(d)

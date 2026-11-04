@@ -13,7 +13,7 @@ luau = pathlib.Path.home() / ".rokit" / "bin" / "luau.exe"
 src = (here.parent / "mod/tss_handcam/lua/ge/extensions/tssHandcam.lua").read_text(encoding="utf-8")
 # Luau gives each module its own globals: the copy is wrapped in a function that takes the game's globals as locals
 GLOBALS = ["__require", "ui_imgui", "vec3", "quatFromDir", "ui_message", "jsonReadFile", "jsonWriteFile", "castRayStatic",
-           "GFXDevice", "core_vehicle_manager", "core_camera", "log"]
+           "GFXDevice", "core_vehicle_manager", "core_camera", "log", "socket"]
 body = src.replace("require(", "__require(").replace("pcall(require,", "pcall(__require,")
 head = "return function(G)\n" + "".join(f"local {g} = G.{g}\n" for g in GLOBALS)
 (here / ".build_ext.lua").write_text(head + body + "\nend\n", encoding="utf-8")

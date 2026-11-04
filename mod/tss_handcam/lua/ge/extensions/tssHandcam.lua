@@ -1,13 +1,15 @@
 -- TSS Handcam: your phone as a handheld camera in BeamNG.
 --
--- phone (AcHandCam app, ARKit/ARCore) --UDP--> AcHandCam PC receiver (Python, unchanged)
---   --shared memory--> this extension --> the "tssHandcam" global camera mode
+-- phone (AcHandCam app, ARKit/ARCore) --UDP--> AcHandCam PC receiver (Python, unchanged) --shared memory-->
+--   our bridge (bridge/handcam_bridge.py) --local UDP--> this extension --> the "tssHandcam" global camera mode
 --   (lua/ge/extensions/core/cameraModes/tssHandcam.lua), drawn every frame by core/cameraUpdate.lua.
 --
 -- The receiver was written for Assetto Corsa (github.com/jxrdxn011/AcHandcam, MIT). It publishes the phone's
 -- pose in three named session-local file mappings (receiver/handheld_receiver/shm.py): Pose (it writes), Status
 -- and View (the game writes; it reads them for recenter requests and to timewarp the phone's live view).
--- BeamNG's LuaJIT reaches them through ffi.C (kernel32: OpenFileMappingA / MapViewOfFile).
+-- BeamNG's FFI accepts struct types but refuses C function declarations from mods ("invalid C type", tested in game
+-- 2026-11-03), so the mod can't map that memory itself: the bridge relays the same bytes over 127.0.0.1 UDP
+-- (BeamNG's luasocket, as core/remoteController.lua uses it). The packets are the mappings' exact layouts.
 --
 -- Camera: a global camera mode (isGlobal) is updated right before rendering with the frame's vehicle data, so a
 -- camera riding with a car (follow-car) is placed with that frame's car pose (no lag). Vertical FOV, as every
@@ -21,11 +23,8 @@ local v = rig.v
 
 local CAM_NAME = 'tssHandcam'
 local SETTINGS = '/settings/tss_handcam.json'
-local NAMES = { -- the receiver's defaults (config.py)
-  pose = 'AcTools.CSP.Limited.HandheldCam.Pose',
-  status = 'AcTools.CSP.Limited.HandheldCam.Status',
-  view = 'AcTools.CSP.Limited.HandheldCam.View',
-}
+local GAME_PORT, BRIDGE_PORT = 47830, 47831 -- bridge -> game (pose), game -> bridge (status, view)
+local POSE_SIZE = 108
 local POSE_MAGIC, POSE_VERSION = 0x31434D48, 3
 local STATUS_MAGIC, STATUS_VERSION = 0x31534D48, 1
 local VIEW_MAGIC, VIEW_VERSION = 0x31564D48, 2
@@ -35,6 +34,7 @@ local STATE_NAMES = {
   [4] = 'paused', [5] = 'holding (no packets)', [6] = 'playing a recorded path',
 }
 local RECEIVER_TIMEOUT = 1.0 -- s without a new heartbeat: the receiver isn't running
+local BRIDGE_TIMEOUT = 1.0   -- s without any packet: the bridge isn't running (it resends every 0.25 s)
 local STICK_TIMEOUT = 0.3    -- s without fresh data: the joystick counts as released
 local MIN_CLEARANCE = 0.15   -- m: the camera never goes closer than this to the ground
 
@@ -52,54 +52,59 @@ local defaults = {
 }
 local cfg = {}
 
--- ------------------------------------------------------------ shared memory
-local ffi, C = nil, nil
-local function initFfi()
-  if ffi then return true end
-  local ok, f = pcall(require, 'ffi')
-  if not ok then return false end
-  ffi = f
-  -- each on its own: after a Lua reload they are already declared, and ffi.cdef refuses to redeclare
-  for _, decl in ipairs({
-    'typedef struct { uint32_t magic, version, seqBegin, heartbeat; int32_t outState; uint32_t flags, generation, trackingState; '
-      .. 'float px, py, pz, fx, fy, fz, ux, uy, uz, latencyMs, rxHz, lossPct, zoom, joyX, joyY; '
-      .. 'uint32_t mode, viewOrientation; float vfAspect; uint32_t seqEnd; } tsshc_pose;',
-    'typedef struct { uint32_t magic, version, heartbeat, engaged, grabbed, lastGeneration, appliedCount; int32_t errorCode; '
-      .. 'float fps, lookSign, sideSign; uint32_t recenterRequests; } tsshc_status;',
-    'typedef struct { uint32_t magic, version, frame, live; float fovV, smoothing; uint32_t poseHeartbeat, hasRot; '
-      .. 'float rx, ry, rz, rw; } tsshc_view;',
-    'void* OpenFileMappingA(uint32_t access, int inherit, const char* name);',
-    'void* MapViewOfFile(void* mapping, uint32_t access, uint32_t offsetHigh, uint32_t offsetLow, size_t bytes);',
-    'int UnmapViewOfFile(const void* p);',
-    'int CloseHandle(void* h);',
-  }) do pcall(ffi.cdef, decl) end
-  C = ffi.C
+-- ------------------------------------------------------------ the link
+-- the receiver's layouts as FFI structs (types only: BeamNG allows those) to unpack and pack the packets
+local ffi = require('ffi')
+for _, decl in ipairs({ -- each on its own: after a Lua reload they exist already and ffi.cdef refuses to redeclare
+  'typedef struct { uint32_t magic, version, seqBegin, heartbeat; int32_t outState; uint32_t flags, generation, trackingState; '
+    .. 'float px, py, pz, fx, fy, fz, ux, uy, uz, latencyMs, rxHz, lossPct, zoom, joyX, joyY; '
+    .. 'uint32_t mode, viewOrientation; float vfAspect; uint32_t seqEnd; } tsshc_pose;',
+  'typedef struct { uint32_t magic, version, heartbeat, engaged, grabbed, lastGeneration, appliedCount; int32_t errorCode; '
+    .. 'float fps, lookSign, sideSign; uint32_t recenterRequests; } tsshc_status;',
+  'typedef struct { uint32_t magic, version, frame, live; float fovV, smoothing; uint32_t poseHeartbeat, hasRot; '
+    .. 'float rx, ry, rz, rw; } tsshc_view;',
+}) do pcall(ffi.cdef, decl) end
+local poseBuf, statusBuf, viewBuf = ffi.new('tsshc_pose'), ffi.new('tsshc_status'), ffi.new('tsshc_view')
+
+local udp = nil
+local udpError = nil
+local packetAge = 99 -- s since the bridge's last packet
+
+local function openSocket()
+  if udp then return true end
+  if not socket or not socket.udp then udpError = 'no UDP sockets in this game version' return false end
+  local s = socket.udp()
+  if not s then udpError = 'could not make a UDP socket' return false end
+  local ok, err = s:setsockname('127.0.0.1', GAME_PORT)
+  if not ok then
+    s:close()
+    udpError = 'port ' .. GAME_PORT .. ' is busy (' .. tostring(err) .. ')'
+    return false
+  end
+  s:settimeout(0)
+  udp, udpError = s, nil
   return true
 end
 
-local FILE_MAP_WRITE, FILE_MAP_READ = 0x2, 0x4
-local maps = {} -- name -> {h, p (typed pointer)}
-
--- Opens a mapping the receiver created (never creates one: no receiver, nothing to talk to).
-local function openMap(key, ctype, size, access)
-  if maps[key] then return maps[key].p end
-  if not initFfi() then return nil end
-  local ok, res = pcall(function()
-    local h = C.OpenFileMappingA(access, 0, 'Local\\' .. NAMES[key])
-    if h == nil then return nil end
-    local p = C.MapViewOfFile(h, access, 0, 0, size)
-    if p == nil then C.CloseHandle(h) return nil end
-    return { h = h, p = ffi.cast(ctype .. '*', p) }
-  end)
-  if ok and res then maps[key] = res return res.p end
-  return nil
+local function closeSocket()
+  if udp then pcall(function() udp:close() end) end
+  udp = nil
 end
 
-local function closeMaps()
-  for k, m in pairs(maps) do
-    pcall(function() C.UnmapViewOfFile(m.p) C.CloseHandle(m.h) end)
-    maps[k] = nil
+-- newest whole pose packet this frame (the bridge may have sent a few), or nil
+local function receive()
+  if not udp then return nil end
+  local last = nil
+  for _ = 1, 64 do
+    local d = udp:receive(256)
+    if not d then break end
+    if #d == POSE_SIZE then last = d end
   end
+  return last
+end
+
+local function send(buf)
+  if udp then pcall(function() udp:sendto(ffi.string(buf, ffi.sizeof(buf)), '127.0.0.1', BRIDGE_PORT) end) end
 end
 
 -- ------------------------------------------------------------------- state
@@ -138,8 +143,11 @@ local function changed() dirty, dirtyTime = true, 1 end
 
 -- ------------------------------------------------------------------ reading
 local function readPose()
-  local p = openMap('pose', 'tsshc_pose', 108, FILE_MAP_READ)
-  if not p then return nil end
+  local d = receive()
+  if not d then return nil end
+  packetAge = 0
+  local p = poseBuf
+  ffi.copy(p, d, POSE_SIZE)
   local e = p.seqEnd
   local s = {
     magic = p.magic, version = p.version, heartbeat = p.heartbeat, state = p.outState, generation = p.generation,
@@ -154,6 +162,7 @@ local function readPose()
 end
 
 local function updateSample(dt)
+  packetAge = packetAge + dt
   local s, valid = readPose()
   if not s then heartbeatAge = heartbeatAge + dt return end
   if s.heartbeat ~= lastHeartbeat then lastHeartbeat, heartbeatAge = s.heartbeat, 0 else heartbeatAge = heartbeatAge + dt end
@@ -174,13 +183,13 @@ local function updateSample(dt)
   end
 end
 
-local function receiverUp() return maps.pose ~= nil and heartbeatAge < RECEIVER_TIMEOUT end
+local function bridgeUp() return packetAge < BRIDGE_TIMEOUT end
+local function receiverUp() return bridgeUp() and heartbeatAge < RECEIVER_TIMEOUT end
 
 -- ------------------------------------------------------------------ writing
 local function writeStatus()
-  if not maps.pose then return end -- no receiver: nothing to open (it creates all three)
-  local st = openMap('status', 'tsshc_status', 48, FILE_MAP_WRITE)
-  if not st then return end
+  if not bridgeUp() then return end
+  local st = statusBuf
   statusBeat = (statusBeat + 1) % 4294967296
   st.magic, st.version, st.heartbeat = STATUS_MAGIC, STATUS_VERSION, statusBeat
   st.engaged = engaged and 1 or 0
@@ -191,14 +200,14 @@ local function writeStatus()
   st.fps = fps
   st.lookSign, st.sideSign = 1, 1
   st.recenterRequests = recenterRequests
+  send(st)
 end
 
 -- what the receiver needs to timewarp the phone's live view: the pose this frame was drawn from, the FOV, and the
 -- rotation from that pose's view to the one drawn (smoothing, head bob)
 local function writeView(live, fov, poseHeartbeat, rot)
-  if not maps.pose then return end
-  local vw = openMap('view', 'tsshc_view', 48, FILE_MAP_WRITE)
-  if not vw then return end
+  if not bridgeUp() then return end
+  local vw = viewBuf
   viewFrame = (viewFrame + 1) % 4294967296
   vw.magic, vw.version, vw.frame = VIEW_MAGIC, VIEW_VERSION, viewFrame
   vw.live = live and 1 or 0
@@ -209,6 +218,7 @@ local function writeView(live, fov, poseHeartbeat, rot)
   else
     vw.hasRot = 0
   end
+  send(vw)
 end
 
 -- ------------------------------------------------------------------ camera
@@ -440,6 +450,13 @@ end
 function M.toggleFollow() cfg.followCar = not cfg.followCar changed() end
 function M.toggleWindow() windowOpen[0] = not windowOpen[0] end
 function M.isEngaged() return engaged end
+-- one line for checks from outside (MCP): link, receiver, phone and camera state
+function M.statusLine()
+  return string.format('socket=%s bridge=%s receiver=%s phone=%s zoom=%s engaged=%s fov=%s err=%s', tostring(udp ~= nil),
+    tostring(bridgeUp()), tostring(receiverUp()), sample and (STATE_NAMES[sample.state] or tostring(sample.state)) or 'none',
+    sample and string.format('%.1f', sample.zoom) or '-', tostring(engaged), curFov and string.format('%.1f', curFov) or '-',
+    udpError or errorText)
+end
 
 -- --------------------------------------------------------------------- UI
 local col = { ok = im.ImVec4(0.35, 0.9, 0.45, 1), warn = im.ImVec4(1, 0.72, 0.2, 1), bad = im.ImVec4(1, 0.38, 0.32, 1), dim = im.ImVec4(0.65, 0.68, 0.72, 1) }
@@ -457,8 +474,9 @@ local function checkbox(key, label)
 end
 
 local function stateLine()
-  if not maps.pose then return 'Receiver not found: start AcHandCam\'s run_receiver.bat', col.bad end
-  if heartbeatAge > RECEIVER_TIMEOUT then return 'Receiver not responding', col.bad end
+  if not udp then return 'No link: ' .. tostring(udpError), col.bad end
+  if not bridgeUp() then return 'Bridge not running: start TSS Handcam\'s bridge/run_bridge.bat', col.bad end
+  if heartbeatAge > RECEIVER_TIMEOUT then return 'Receiver not running: start AcHandCam\'s run_receiver.bat', col.bad end
   if not sample then return 'Receiver running: waiting for the phone', col.warn end
   if frozen then return 'Frozen (in game)', col.warn end
   local st = sample.state or 0
@@ -504,9 +522,9 @@ end
 -- ------------------------------------------------------------------ hooks
 local function onUpdate(dtReal)
   local dt = math.max(1e-4, dtReal or 1 / 60)
-  if not maps.pose then
+  if not udp then
     M._retry = (M._retry or 0) - dt
-    if M._retry <= 0 then M._retry = 1 openMap('pose', 'tsshc_pose', 108, FILE_MAP_READ) end
+    if M._retry <= 0 then M._retry = 2 openSocket() end
   end
   updateSample(dt)
   if engaged and core_camera.getActiveGlobalCameraName() ~= CAM_NAME then
@@ -526,7 +544,7 @@ local function onExtensionLoaded() loadSettings() end
 local function onExtensionUnloaded()
   if engaged then M.release() end
   if dirty then saveSettings() end
-  closeMaps()
+  closeSocket()
 end
 
 M.onUpdate = onUpdate
