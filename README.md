@@ -17,7 +17,8 @@ drives a camera of its own. Nothing of AcHandCam is changed or shipped here.
    and your Apple ID (needs iTunes and iCloud from apple.com, not the Microsoft Store). Turn on Developer Mode and trust
    your Apple ID on the phone. A free Apple ID: re-sign every 7 days. Android: the `.apk` (ARCore phones).
 3. **Bridge (PC):** double-click `bridge/run_bridge.bat`, next to the receiver (either order). It shows the receiver's
-   heartbeat and whether the game is connected.
+   heartbeat and whether the game is connected. `start_handcam.bat` starts both (set `RECEIVER` at its top to where
+   the receiver is unzipped); the "TSS Handcam" desktop shortcut runs it.
 4. **Game:** this mod (`mod/tss_handcam`) in `mods/unpacked/`. Bind the keys in *Options > Controls > Camera*:
    "TSS Handcam: film with the phone / release", recenter, freeze, ride with my car, settings window.
 5. Open the phone app, enter the PC address the receiver shows, tap *Start tracking*. The **TSS Handcam** window opens
