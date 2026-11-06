@@ -1,0 +1,43 @@
+# The iPhone app, built on a GitHub Mac (there is no Mac here): packet tests on a simulator, then an UNSIGNED .ipa
+# that Sideloadly signs with the user's Apple ID on the PC. No Apple ID, certificate or token ever goes in here.
+name: ios
+on:
+  push:
+    paths: ["app/**", ".github/workflows/ios.yml"]
+  workflow_dispatch: {}
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          brew install xcodegen
+      - name: Generate the Xcode project
+        run: cd app && xcodegen generate
+      - name: Packet tests (simulator)
+        run: |
+          cd app
+          UDID=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(next(x['udid'] for k,v in d.items() if 'iOS' in k for x in v if x['name'].startswith('iPhone')))")
+          echo "simulator $UDID"
+          xcodebuild test -project TSSCam.xcodeproj -scheme TSSCam -destination "id=$UDID" -quiet
+      - name: Archive (unsigned)
+        run: |
+          cd app
+          xcodebuild archive -project TSSCam.xcodeproj -scheme TSSCam -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/TSSCam.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" -quiet
+      - name: Package the .ipa
+        run: |
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$RUNNER_TEMP/TSSCam.xcarchive/Products/Applications/TSSCam.app" "$RUNNER_TEMP/ipa/Payload/"
+          lipo -info "$RUNNER_TEMP/ipa/Payload/TSSCam.app/TSSCam"
+          cd "$RUNNER_TEMP/ipa" && zip -qry "TSSCam-${GITHUB_SHA::7}-unsigned.ipa" Payload
+          ls -la
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TSSCam-ipa
+          path: ${{ runner.temp }}/ipa/*.ipa
+          retention-days: 14

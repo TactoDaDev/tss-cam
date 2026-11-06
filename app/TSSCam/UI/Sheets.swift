@@ -34,7 +34,7 @@ struct CarSheet: View {
 
     private func header(_ caps: Caps) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(caps.car.isEmpty ? "No car" : caps.car).font(.system(size: 26, weight: .heavy))
+            Text((caps.car.isEmpty ? "No car" : caps.car).uppercased()).font(.readout(26))
             Text(caps.connected ? "\(GAME_LABELS[caps.game ?? ""] ?? "Game") · \(caps.controls.count) controls" : "Game not connected")
                 .font(.system(size: 13)).foregroundStyle(.secondary)
             HStack {
@@ -46,7 +46,7 @@ struct CarSheet: View {
 
     private func group(_ title: String, _ items: [Control]) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(title).font(.system(size: 11, weight: .heavy)).tracking(1.6).foregroundStyle(.secondary)
+            Text(title).font(.race(11)).tracking(1.6).foregroundStyle(Livery.sky)
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 10)], spacing: 10) {
                 ForEach(items) { c in ControlButton(control: c) }
             }
@@ -55,7 +55,7 @@ struct CarSheet: View {
 
     private var cars: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("FILM WHICH CAR").font(.system(size: 11, weight: .heavy)).tracking(1.6).foregroundStyle(.secondary)
+            Text("FILM WHICH CAR").font(.race(11)).tracking(1.6).foregroundStyle(Livery.sky)
             HStack {
                 pill("Previous") { link.command("car.prev") }
                 pill("Mine") { link.command("car.player") }
@@ -66,11 +66,11 @@ struct CarSheet: View {
 
     private func time(_ caps: Caps) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("SLOW MOTION · \(String(format: "%.2f", slowmo))x").font(.system(size: 11, weight: .heavy)).tracking(1.6).foregroundStyle(.secondary)
+            Text("SLOW MOTION · \(String(format: "%.2f", slowmo))x").font(.race(11)).tracking(1.6).foregroundStyle(Livery.sky)
             Slider(value: $slowmo, in: 0.05...1, onEditingChanged: { editing in
                 if !editing { link.command("time", ["speed": slowmo]) }
             })
-            .tint(Color.white)
+            .tint(Livery.red)
         }
         .onAppear { slowmo = caps.time }
     }
@@ -105,9 +105,9 @@ struct ControlButton: View {
             .font(.system(size: 13, weight: .semibold)).multilineTextAlignment(.center)
             .frame(maxWidth: .infinity, minHeight: 46)
             .padding(.horizontal, 6)
-            .foregroundStyle(on ? Color.black : Color.white)
-            .background(on ? Color.white : Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.14)))
+            .foregroundStyle(Color.white)
+            .background(on ? Livery.red.opacity(0.85) : Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(on ? Livery.red : Color.white.opacity(0.14)))
             .contentShape(Rectangle())
     }
 
