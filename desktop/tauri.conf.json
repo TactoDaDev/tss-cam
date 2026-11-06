@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "TSS Cam",
+  "version": "0.1.0",
+  "identifier": "app.tss.cam",
+  "build": {
+    "frontendDist": "splash"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "publisher": "TSS",
+    "shortDescription": "Your phone as a handheld camera in BeamNG.drive and Assetto Corsa",
+    "windows": {
+      "nsis": { "installMode": "currentUser", "installerIcon": "icons/icon.ico" },
+      "webviewInstallMode": { "type": "embedBootstrapper", "silent": true }
+    }
+  }
+}

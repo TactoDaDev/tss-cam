@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TSS Cam</title>
+<style>
+  html, body { height: 100%; margin: 0; background: #0b0b10; color: #f2ede4; font: 14px "Segoe UI Variable Text", "Segoe UI", sans-serif; }
+  body { display: grid; place-items: center; }
+  .box { text-align: center; }
+  .mark { width: 64px; height: 64px; margin: 0 auto 18px; border-radius: 18px; position: relative;
+          background: linear-gradient(120deg, #7ee8fa 0%, #b48cff 40%, #ff9ad5 70%, #ffd48a 100%); }
+  .mark::after { content: ""; position: absolute; inset: 19px; border-radius: 50%; background: #0b0b10; box-shadow: 0 0 0 4px rgba(255,255,255,0.9); }
+  h1 { font-size: 26px; letter-spacing: -0.6px; margin: 0 0 6px; }
+  p { color: #8f8a9c; margin: 0; }
+  body[data-state="error"] p { color: #ffc2bb; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <div class="mark"></div>
+    <h1>TSS Cam</h1>
+    <p id="msg">Starting the receiver…</p>
+  </div>
+</body>
+</html>
