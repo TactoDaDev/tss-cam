@@ -137,20 +137,26 @@ struct ContentView: View {
     }
 
     private func modePills(_ caps: Caps) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(caps.modes, id: \.self) { m in
-                    let on = caps.camMode == m
-                    Button { link.command("cam.mode", ["mode": m]) } label: {
-                        Text((MODE_LABELS[m] ?? m).uppercased()).font(.race(12)).tracking(0.6)
-                            .padding(.horizontal, 14).padding(.vertical, 8)
-                            .foregroundStyle(Color.white)
-                            .background(on ? Livery.red.opacity(0.35) : Livery.glass, in: Capsule())
-                            .overlay(Capsule().stroke(on ? Livery.red : Color.white.opacity(0.16), lineWidth: on ? 1.5 : 1))
+        ScrollViewReader { reader in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(caps.modes, id: \.self) { m in
+                        let on = caps.camMode == m
+                        Button { link.command("cam.mode", ["mode": m]) } label: {
+                            Text((MODE_LABELS[m] ?? m).uppercased()).font(.race(12)).tracking(0.6)
+                                .padding(.horizontal, 14).padding(.vertical, 8)
+                                .foregroundStyle(Color.white)
+                                .background(on ? Livery.red.opacity(0.35) : Livery.glass, in: Capsule())
+                                .overlay(Capsule().stroke(on ? Livery.red : Color.white.opacity(0.16), lineWidth: on ? 1.5 : 1))
+                        }
+                        .id(m)
+                        .accessibilityIdentifier("mode-\(m)")
                     }
-                    .accessibilityIdentifier("mode-\(m)")
                 }
             }
+            // the selected mode is always in view (it can be off the edge of the row)
+            .onAppear { reader.scrollTo(caps.camMode, anchor: .center) }
+            .onChange(of: caps.camMode) { m in withAnimation(.easeOut(duration: 0.2)) { reader.scrollTo(m, anchor: .center) } }
         }
     }
 
@@ -223,7 +229,8 @@ struct ViewfinderMarks: View {
                 p.move(to: CGPoint(x: 0, y: h - l)); p.addLine(to: CGPoint(x: 0, y: h)); p.addLine(to: CGPoint(x: l, y: h))
                 p.move(to: CGPoint(x: w - l, y: h)); p.addLine(to: CGPoint(x: w, y: h)); p.addLine(to: CGPoint(x: w, y: h - l))
             }
-            .stroke(Color.white.opacity(0.85), lineWidth: 2)
+            .stroke(Color.white.opacity(0.9), lineWidth: 2)
+            .shadow(color: .black.opacity(0.6), radius: 2) // still visible over bright scenes
             RoundedRectangle(cornerRadius: 4).stroke(Livery.sky, lineWidth: 1.5)
                 .frame(width: 70, height: 70).position(x: w / 2, y: h / 2)
                 .shadow(color: Livery.sky.opacity(0.5), radius: 6)
