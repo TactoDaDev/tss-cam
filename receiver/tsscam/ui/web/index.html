@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TSS Cam</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="ambient" width="64" height="40" aria-hidden="true"></canvas>
+<div class="shell">
+  <nav class="rail">
+    <div class="brand"><span class="mark" aria-hidden="true"></span><span>TSS Cam</span></div>
+    <button class="nav active" data-view="home"><svg viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>Home</button>
+    <button class="nav" data-view="settings"><svg viewBox="0 0 24 24"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm8.6 2.2-1.9-.4a7 7 0 0 0-.7-1.7l1.1-1.6-1.9-1.9-1.6 1.1a7 7 0 0 0-1.7-.7l-.4-1.9h-2.8l-.4 1.9a7 7 0 0 0-1.7.7L6.9 5.1 5 7l1.1 1.6a7 7 0 0 0-.7 1.7l-1.9.4v2.8l1.9.4c.2.6.4 1.2.7 1.7L5 17.1 6.9 19l1.6-1.1c.5.3 1.1.5 1.7.7l.4 1.9h2.8l.4-1.9c.6-.2 1.2-.4 1.7-.7l1.6 1.1 1.9-1.9-1.1-1.6c.3-.5.5-1.1.7-1.7l1.9-.4z"/></svg>Settings</button>
+    <div class="grow"></div>
+    <div class="card status-card">
+      <div class="label"><span class="dot" id="rxDot"></span><span id="rxLabel">RECEIVER</span></div>
+      <div class="muted small" id="rxLine">starting…</div>
+    </div>
+  </nav>
+
+  <main id="home" class="view">
+    <section class="hero">
+      <div class="pill" id="phonePill"><span class="dot"></span><span id="phonePillText">WAITING FOR THE PHONE</span></div>
+      <h1 id="heroTitle">Open TSS Cam on your phone</h1>
+      <p class="sub" id="heroSub">Enter this PC's address in the app. Phone and PC on the same Wi-Fi.</p>
+      <div class="actions">
+        <button class="btn hero-btn" id="recenter">Recenter</button>
+        <button class="btn" id="freeze">Freeze</button>
+        <button class="btn ghost hidden" id="accept">Use the new phone</button>
+      </div>
+    </section>
+
+    <div class="section-head"><span>GAME</span><span class="muted small" id="gameHint">Auto picks whichever game is running</span></div>
+    <div class="tiles" id="tiles">
+      <button class="tile" data-mode="auto"><div class="art auto"></div><div class="tile-body"><b>Auto</b><span class="muted small">Detect the game</span></div></button>
+      <button class="tile" data-mode="beamng"><div class="art" style="background-image:url(/art/beamng.jpg)"></div><div class="tile-body"><b>BeamNG.drive</b><span class="muted small" data-state></span></div></button>
+      <button class="tile" data-mode="assetto"><div class="art" style="background-image:url(/art/assetto.jpg)"></div><div class="tile-body"><b>Assetto Corsa</b><span class="muted small" data-state></span></div></button>
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="section-head tight"><span>CONNECT</span><span class="pill small" id="fwPill"></span></div>
+        <div class="addr" id="addr">…</div>
+        <div class="muted small">UDP port <span class="keycap" id="port">47820</span> · type the address in the app</div>
+        <button class="btn small hidden" id="firewall">Allow through the firewall</button>
+      </div>
+      <div class="card">
+        <div class="section-head tight"><span>CAR</span><span class="pill small" id="gamePill"></span></div>
+        <div class="big" id="car">No car yet</div>
+        <div class="muted small" id="carLine">Start the game with the TSS Cam mod</div>
+      </div>
+      <div class="card">
+        <div class="section-head tight"><span>LIVE VIEW</span><span class="pill small" id="livePill"></span></div>
+        <div class="big" id="liveBig">Off</div>
+        <div class="muted small" id="liveLine">Starts when the phone's viewfinder shows the game</div>
+      </div>
+    </div>
+  </main>
+
+  <main id="settings" class="view hidden">
+    <section class="hero compact">
+      <h1>Settings</h1>
+      <p class="sub">TSS Cam receiver <span id="ver"></span>. Built on the open-source AcHandCam receiver (MIT).</p>
+    </section>
+    <div class="card">
+      <div class="section-head tight"><span>PHONE LINK</span></div>
+      <div class="kv"><span>Packets lost</span><b id="sLoss">-</b></div>
+      <div class="kv"><span>Tracking</span><b id="sTrack">-</b></div>
+      <div class="kv"><span>Zoom</span><b id="sZoom">-</b></div>
+      <div class="kv"><span>Commands / sticks / bad</span><b id="sCounts">-</b></div>
+      <div class="kv"><span>Listening on</span><b id="sListen">-</b></div>
+    </div>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
