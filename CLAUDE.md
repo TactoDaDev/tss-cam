@@ -25,7 +25,14 @@ explored in `docs/design/tsscam-styles.figcraft`. No green accents. Craft/perf r
   kill-on-close job object and shows its page. `cargo build` -> `desktop/target/debug/tsscam.exe`.
 
 ## Tests
-`cd receiver && python tests/test_tsscam.py` (fake phone + fake game over real local UDP; no hardware).
+- `cd receiver && python tests/test_tsscam.py` (fake phone + fake game over real local UDP; no hardware).
+- `games/beamng/tools/run_tests.py` (Luau: rig, extension, packets + car controls).
+- CI end to end (`.github/workflows/ios.yml`, `tools/ci_e2e.py`, `app/TSSCamUITests`): on the macOS runner the real
+  receiver + a fake BeamNG run while the app (simulator, `-host 127.0.0.1 -fakeTracking`) is driven by a UI test;
+  the report (artifact TSSCam-e2e) checks accepted poses/s (count them: the receiver's rate_hz is 1/gap and bursts
+  inflate it), hello, caps, recenter, sticks and every command. Found and fixed: poses sent from the main thread
+  (~31/s, bursts); the shutter's tap vs long-press race. The CI VM still drops ~9% as stale (>150 ms late).
+- Real screenshots of the app: artifact TSSCam-screens (`-demo`, `-demoWalk`, `-demoCar`).
 
 ## Rules
 - Repo `TactoDaDev/tss-cam`: public while building (free macOS CI minutes), the user makes it private when done.

@@ -239,10 +239,35 @@ struct ViewfinderMarks: View {
 }
 
 /// The hero control: tap = film in the game (or recenter on a stock receiver), hold = freeze while held.
+/// One gesture decides by time (released before 0.35 s = tap; held longer = freeze until released): a separate
+/// tap and long-press gesture raced, and a tap held a little long (or a busy device) became a freeze instead
+/// (the CI end-to-end run lost a "film" tap that way).
 struct Shutter: View {
     let filming: Bool
     @Binding var frozen: Bool
     let tap: () -> Void
+    @State private var pressed = false
+    @State private var holdWork: DispatchWorkItem?
+
+    private var press: some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { _ in
+                guard !pressed else { return }
+                pressed = true
+                let w = DispatchWorkItem {
+                    frozen = true
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                }
+                holdWork = w
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: w)
+            }
+            .onEnded { _ in
+                holdWork?.cancel()
+                holdWork = nil
+                pressed = false
+                if frozen { frozen = false } else { tap() }
+            }
+    }
 
     var body: some View {
         ZStack {
@@ -255,11 +280,11 @@ struct Shutter: View {
         .accessibilityElement(children: .ignore)
         .accessibilityIdentifier("shutter")
         .accessibilityAddTraits(.isButton)
-        .onTapGesture { tap() }
-        .onLongPressGesture(minimumDuration: 0.3, pressing: { p in
-            if !p { frozen = false }
-        }, perform: { frozen = true; UIImpactFeedbackGenerator(style: .light).impactOccurred() })
+        .accessibilityAction { tap() } // VoiceOver / UI tests activate it as a button
+        .gesture(press)
+        .scaleEffect(pressed ? 0.94 : 1)
         .animation(.easeOut(duration: 0.15), value: filming)
+        .animation(.easeOut(duration: 0.1), value: pressed)
     }
 
     private var ring: AngularGradient {
