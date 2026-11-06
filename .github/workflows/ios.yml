@@ -22,7 +22,28 @@ jobs:
           cd app
           UDID=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(next(x['udid'] for k,v in d.items() if 'iOS' in k for x in v if x['name'].startswith('iPhone')))")
           echo "simulator $UDID"
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
           xcodebuild test -project TSSCam.xcodeproj -scheme TSSCam -destination "id=$UDID" -quiet
+      - name: Screenshots (simulator, demo state; no ARKit there, so the camera feed is black)
+        run: |
+          cd app
+          xcodebuild build -project TSSCam.xcodeproj -scheme TSSCam -destination "id=$UDID" -derivedDataPath build -quiet
+          APP=$(find build -name "TSSCam.app" -path "*iphonesimulator*" | head -1)
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl status_bar "$UDID" override --time 9:41 --batteryState charged --batteryLevel 100 || true
+          xcrun simctl install "$UDID" "$APP"
+          mkdir -p "$RUNNER_TEMP/shots"
+          shot() { xcrun simctl terminate "$UDID" app.tss.cam || true; xcrun simctl launch "$UDID" app.tss.cam -demo "$@"; sleep 7; }
+          shot;                 xcrun simctl io "$UDID" screenshot "$RUNNER_TEMP/shots/1-main.png"
+          shot -demoWalk;       xcrun simctl io "$UDID" screenshot "$RUNNER_TEMP/shots/2-walk.png"
+          shot -demoCar;        xcrun simctl io "$UDID" screenshot "$RUNNER_TEMP/shots/3-car.png"
+          ls -la "$RUNNER_TEMP/shots"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TSSCam-screens
+          path: ${{ runner.temp }}/shots/*.png
+          retention-days: 14
       - name: Archive (unsigned)
         run: |
           cd app

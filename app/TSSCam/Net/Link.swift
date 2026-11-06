@@ -88,6 +88,35 @@ final class Link: ObservableObject {
         conn?.send(content: d, completion: .contentProcessed { _ in })
     }
 
+    /// Demo state for screenshots (launch argument -demo): live, BeamNG, an ETK 800 with its real controls.
+    func demo() {
+        host = "192.168.0.137"
+        let controls: [[String: Any]] = [
+            ["id": "panel:door_FL", "label": "Front left door", "group": "doors", "kind": "toggle", "value": 1],
+            ["id": "panel:door_FR", "label": "Front right door", "group": "doors", "kind": "toggle"],
+            ["id": "panel:door_RL", "label": "Rear left door", "group": "doors", "kind": "toggle"],
+            ["id": "panel:door_RR", "label": "Rear right door", "group": "doors", "kind": "toggle", "value": 1],
+            ["id": "panel:hoodCatch", "label": "Hood", "group": "doors", "kind": "toggle"],
+            ["id": "panel:tailgate", "label": "Tailgate", "group": "doors", "kind": "toggle", "value": 1],
+            ["id": "lights", "label": "Lights", "group": "lights", "kind": "cycle", "value": 2, "states": ["Off", "Low", "High"]],
+            ["id": "highbeam", "label": "High beams", "group": "lights", "kind": "toggle"],
+            ["id": "hazard", "label": "Hazards", "group": "lights", "kind": "toggle", "value": 1],
+            ["id": "signal_left", "label": "Left signal", "group": "lights", "kind": "toggle"],
+            ["id": "signal_right", "label": "Right signal", "group": "lights", "kind": "toggle"],
+            ["id": "fog", "label": "Fog lights", "group": "lights", "kind": "toggle"],
+            ["id": "horn", "label": "Horn", "group": "horn", "kind": "hold"],
+            ["id": "engine", "label": "Engine", "group": "car", "kind": "toggle", "value": 1],
+            ["id": "parkbrake", "label": "Parking brake", "group": "car", "kind": "toggle", "value": 1],
+        ]
+        let caps: [String: Any] = ["game": "beamng", "connected": true, "car": "ETK 800-Series", "camMode": "chase",
+                                   "modes": ["hand", "ride", "hood", "passenger", "chase", "drone", "lockon"],
+                                   "engaged": true, "time": 1.0, "controls": controls]
+        live = true
+        rttMs = 12
+        status = "Live"
+        self.caps = Caps(caps)
+    }
+
     func sayHello() {
         helloAt = Date()
         let info: [String: Any] = ["app": "tsscam", "ver": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"]

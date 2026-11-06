@@ -32,7 +32,18 @@ final class AppModel: ObservableObject {
         if host.isEmpty { showConnect = true } else { link.connect(host: host) }
     }
 
-    func start() { tracker.start() }
+    func start() {
+        let args = ProcessInfo.processInfo.arguments
+        if args.contains("-demo") { // screenshots on the CI simulator (no ARKit there)
+            link.demo()
+            showConnect = false
+            trackingText = "Tracking"
+            if args.contains("-demoCar") { showCar = true }
+            if args.contains("-demoWalk") { tab = .walk }
+            return
+        }
+        tracker.start()
+    }
     func stop() { tracker.pause() }
 
     func connect(to h: String) {
