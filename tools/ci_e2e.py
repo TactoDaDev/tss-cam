@@ -110,6 +110,8 @@ def main() -> int:
 
     best_rate, accepted_seen, t0 = 0.0, False, time.monotonic()
     gen_live = None  # the receiver's generation when it first went live: a recenter bumps it
+    per_sec: list[int] = []  # accepted poses per second while live: the real rate (the receiver's rate_hz is an
+    last_acc = None          # average of 1/gap, which a burst of packets inflates)
     while time.monotonic() - t0 < a.seconds:
         time.sleep(1)
         s = svc.snapshot()
@@ -117,8 +119,11 @@ def main() -> int:
         accepted_seen = accepted_seen or s.state_name == "live"
         if accepted_seen and gen_live is None:
             gen_live = s.generation
+        if s.state_name == "live" and last_acc is not None:
+            per_sec.append(s.stats.accepted - last_acc)
+        last_acc = s.stats.accepted
         h = hub.status()
-        print(f"e2e: {s.state_name} {s.stats.rate_hz:.0f} Hz | hub {h['counts']} | game cmds {len(game.commands)} sticks {game.sticks}", flush=True)
+        print(f"e2e: {s.state_name} {(per_sec[-1] if per_sec else 0)}/s (rate_hz {s.stats.rate_hz:.0f}) lost {s.stats.lost} stale {s.stats.stale} ooo {s.stats.out_of_order} | hub {h['counts']} | game cmds {len(game.commands)} sticks {game.sticks}", flush=True)
         if a.done and Path(a.done).exists():
             time.sleep(2)  # let the last packets land
             break
@@ -135,7 +140,7 @@ def main() -> int:
         got.append(tag)
     expected = [e for e in a.expect.split(",") if e]
     checks = {
-        "poses at >= 40 Hz": best_rate >= 40,
+        "poses: 45-130 accepted per second (median)": bool(per_sec) and 45 <= sorted(per_sec)[len(per_sec) // 2] <= 130,
         "receiver went live": accepted_seen,
         "hello answered": h["counts"]["hello"] >= 1,
         "capabilities delivered": h["counts"]["caps"] >= 1,
@@ -145,7 +150,9 @@ def main() -> int:
     }
     for e in expected:
         checks[f"command {e}"] = e in got
-    report = {"checks": checks, "best_rate_hz": best_rate, "commands": game.commands, "sticks": game.sticks,
+    snap = svc.snapshot().stats
+    report = {"checks": checks, "best_rate_hz": best_rate, "accepted_per_second": per_sec,
+              "lost": snap.lost, "stale": snap.stale, "out_of_order": snap.out_of_order, "received": snap.received, "commands": game.commands, "sticks": game.sticks,
               "hub": h, "passed": all(checks.values())}
     Path(a.report).write_text(json.dumps(report, indent=1))
     for k, v in checks.items():
