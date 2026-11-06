@@ -43,11 +43,22 @@ targets:
         GENERATE_INFOPLIST_FILE: YES   # a test bundle needs one to be signed for the simulator
     dependencies:
       - target: TSSCam
+  TSSCamUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [TSSCamUITests]
+    dependencies:
+      - target: TSSCam
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: TSSCam
 schemes:
   TSSCam:
     build:
       targets:
         TSSCam: all
         TSSCamTests: [test]
+        TSSCamUITests: [test]
     test:
-      targets: [TSSCamTests]
+      targets: [TSSCamTests, TSSCamUITests]

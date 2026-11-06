@@ -125,12 +125,13 @@ struct ContentView: View {
     private var sticks: some View {
         HStack(alignment: .bottom) {
             if model.tab == .walk {
-                Thumbstick(value: $model.move, label: "MOVE")
+                Thumbstick(value: $model.move, label: "MOVE").accessibilityIdentifier("stick-move")
             }
             Spacer()
             if link.caps != nil {
                 Thumbstick(value: Binding(get: { CGPoint(x: model.look, y: -model.lift) },
                                           set: { model.look = $0.x; model.lift = -$0.y }), label: "LIFT · TURN")
+                    .accessibilityIdentifier("stick-lift")
             }
         }
     }
@@ -147,6 +148,7 @@ struct ContentView: View {
                             .background(on ? Livery.red.opacity(0.35) : Livery.glass, in: Capsule())
                             .overlay(Capsule().stroke(on ? Livery.red : Color.white.opacity(0.16), lineWidth: on ? 1.5 : 1))
                     }
+                    .accessibilityIdentifier("mode-\(m)")
                 }
             }
         }
@@ -178,6 +180,7 @@ struct ContentView: View {
                         Slant(lean: 3).fill(model.tab == t ? Livery.red : Color.clear).frame(width: 26, height: 3)
                     }
                 }
+                .accessibilityIdentifier("tab-\(t.rawValue)")
             }
         }
     }
@@ -205,6 +208,7 @@ struct ContentView: View {
                 Text(label).font(.race(10)).tracking(0.8)
             }.foregroundStyle(Color.white)
         }
+        .accessibilityIdentifier(label.lowercased())
     }
 }
 
@@ -241,6 +245,9 @@ struct Shutter: View {
                 .frame(width: filming ? 34 : 62, height: filming ? 34 : 62)
         }
         .contentShape(Circle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityIdentifier("shutter")
+        .accessibilityAddTraits(.isButton)
         .onTapGesture { tap() }
         .onLongPressGesture(minimumDuration: 0.3, pressing: { p in
             if !p { frozen = false }

@@ -39,7 +39,33 @@ final class Tracker: NSObject, ARSessionDelegate {
 
     func pause() {
         session.pause()
+        fakeLink?.invalidate()
+        fakeLink = nil
         running = false
+    }
+
+    // MARK: fake tracking (CI simulator: no ARKit there) — a smooth slow orbit at the display rate (60 Hz)
+    private var fakeLink: CADisplayLink?
+    private var fakeStart: CFTimeInterval = 0
+
+    func startFake() {
+        fakeLink?.invalidate()
+        fakeStart = CACurrentMediaTime()
+        let l = CADisplayLink(target: self, selector: #selector(fakeTick))
+        l.preferredFramesPerSecond = 60
+        l.add(to: .main, forMode: .common)
+        fakeLink = l
+        running = true
+        appLog("fake tracking started (60 Hz)")
+    }
+
+    @objc private func fakeTick() {
+        let t = Float(CACurrentMediaTime() - fakeStart)
+        let yaw = 0.3 * sin(t * 0.5)
+        let q = simd_quatf(angle: yaw, axis: SIMD3<Float>(0, 1, 0))
+        onPose?(TrackedPose(time: ProcessInfo.processInfo.systemUptime,
+                            position: SIMD3(0.3 * sin(t * 0.4), 1.5, 0.3 * cos(t * 0.4) - 0.3),
+                            orientation: SIMD4(q.imag.x, q.imag.y, q.imag.z, q.real), state: 2, reason: 0))
     }
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {

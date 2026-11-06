@@ -109,6 +109,10 @@ struct ControlButton: View {
             .background(on ? Livery.red.opacity(0.85) : Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
             .overlay(RoundedRectangle(cornerRadius: 14).stroke(on ? Livery.red : Color.white.opacity(0.14)))
             .contentShape(Rectangle())
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(title)
+            .accessibilityIdentifier("ctl-\(control.id)")
+            .accessibilityAddTraits(.isButton)
     }
 
     @ViewBuilder var body: some View {

@@ -3,7 +3,7 @@
 name: ios
 on:
   push:
-    paths: ["app/**", ".github/workflows/ios.yml"]
+    paths: ["app/**", "receiver/**", "tools/ci_e2e.py", ".github/workflows/ios.yml"]
   workflow_dispatch: {}
 jobs:
   build:
@@ -23,7 +23,30 @@ jobs:
           UDID=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(next(x['udid'] for k,v in d.items() if 'iOS' in k for x in v if x['name'].startswith('iPhone')))")
           echo "simulator $UDID"
           echo "UDID=$UDID" >> "$GITHUB_ENV"
-          xcodebuild test -project TSSCam.xcodeproj -scheme TSSCam -destination "id=$UDID" -quiet
+          xcodebuild test -project TSSCam.xcodeproj -scheme TSSCam -destination "id=$UDID" -only-testing:TSSCamTests -quiet
+      - name: End to end (real receiver + fake BeamNG on this Mac, the app in the simulator driven by a UI test)
+        continue-on-error: true   # the .ipa still builds; the report (artifact TSSCam-e2e) says what failed
+        run: |
+          python3 --version
+          python3 tools/ci_e2e.py --seconds 900 --done "$RUNNER_TEMP/ui-done" --report "$RUNNER_TEMP/e2e.json" > "$RUNNER_TEMP/e2e.log" 2>&1 &
+          HARNESS=$!
+          sleep 3
+          cd app
+          UI=0
+          xcodebuild test -project TSSCam.xcodeproj -scheme TSSCam -destination "id=$UDID" -only-testing:TSSCamUITests -resultBundlePath "$RUNNER_TEMP/ui.xcresult" -quiet || UI=1
+          touch "$RUNNER_TEMP/ui-done"
+          E2E=0; wait $HARNESS || E2E=$?
+          tail -60 "$RUNNER_TEMP/e2e.log"
+          mkdir -p "$RUNNER_TEMP/e2e" && cp "$RUNNER_TEMP/e2e.json" "$RUNNER_TEMP/e2e.log" "$RUNNER_TEMP/e2e/" || true
+          xcrun xcresulttool export attachments --path "$RUNNER_TEMP/ui.xcresult" --output-path "$RUNNER_TEMP/e2e" || true
+          echo "ui test: $UI  harness: $E2E"
+          [ "$UI" = 0 ] && [ "$E2E" = 0 ]
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: TSSCam-e2e
+          path: ${{ runner.temp }}/e2e/
+          retention-days: 14
       - name: Screenshots (simulator, demo state; no ARKit there, so the camera feed is black)
         run: |
           cd app

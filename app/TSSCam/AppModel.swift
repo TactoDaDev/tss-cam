@@ -42,7 +42,12 @@ final class AppModel: ObservableObject {
             if args.contains("-demoWalk") { tab = .walk }
             return
         }
-        tracker.start()
+        // CI end-to-end: -host <address> connects straight away, -fakeTracking replaces ARKit (not in the simulator)
+        if let i = args.firstIndex(of: "-host"), i + 1 < args.count {
+            showConnect = false
+            connect(to: args[i + 1])
+        }
+        if args.contains("-fakeTracking") { tracker.startFake() } else { tracker.start() }
     }
     func stop() { tracker.pause() }
 
