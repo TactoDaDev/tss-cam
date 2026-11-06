@@ -1,4 +1,5 @@
-"""Offline tests: the maths (test_rig.lua) and the real extension against a fake receiver (test_ext.lua).
+"""Offline tests: the maths (test_rig.lua), the real extension against a fake receiver (test_ext.lua), and the
+TSS Cam packets + car controls (test_control.lua).
 
 Luau's require can't be swapped inside another module, so the extension is copied to tools/.build_ext.lua with
 require(...) renamed to __require(...), which test_ext.lua provides (fake ffi, the real rig module).
@@ -13,12 +14,14 @@ luau = pathlib.Path.home() / ".rokit" / "bin" / "luau.exe"
 src = (here.parent / "mod/tss_handcam/lua/ge/extensions/tssHandcam.lua").read_text(encoding="utf-8")
 # Luau gives each module its own globals: the copy is wrapped in a function that takes the game's globals as locals
 GLOBALS = ["__require", "ui_imgui", "vec3", "quatFromDir", "ui_message", "jsonReadFile", "jsonWriteFile", "castRayStatic",
-           "GFXDevice", "core_vehicle_manager", "core_camera", "log", "socket", "ui_visibility"]
+           "GFXDevice", "core_vehicle_manager", "core_camera", "log", "socket", "ui_visibility",
+           "jsonEncode", "jsonDecode", "getObjectByID", "getPlayerVehicle", "be", "simTimeAuthority", "core_replay",
+           "core_vehicles", "translateLanguage"]
 body = src.replace("require(", "__require(").replace("pcall(require,", "pcall(__require,")
 head = "return function(G)\n" + "".join(f"local {g} = G.{g}\n" for g in GLOBALS)
 (here / ".build_ext.lua").write_text(head + body + "\nend\n", encoding="utf-8")
 ok = True
-for test in ("test_rig.lua", "test_ext.lua"):
+for test in ("test_rig.lua", "test_ext.lua", "test_control.lua"):
     r = subprocess.run([str(luau), test], cwd=here, capture_output=True, text=True)
     out = (r.stdout + r.stderr).strip()
     print(f"== {test}\n{out}\n")

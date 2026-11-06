@@ -91,14 +91,21 @@ local function closeSocket()
   udp = nil
 end
 
--- newest whole pose packet this frame (the bridge may have sent a few), or nil
+local handleTsc -- TSS Cam's own packets (commands, sticks), defined with the car controls below
+
+-- newest whole pose packet this frame (the receiver may have sent a few), or nil; TSS Cam packets are handled
 local function receive()
   if not udp then return nil end
   local last = nil
   for _ = 1, 64 do
-    local d = udp:receive(256)
+    local d = udp:receive(8192)
     if not d then break end
-    if #d == POSE_SIZE then last = d end
+    if #d == POSE_SIZE then
+      last = d
+    elseif type(d) == 'string' and d:sub(1, 3) == 'TSC' then
+      packetAge = 0
+      handleTsc(d)
+    end
   end
   return last
 end
@@ -235,17 +242,242 @@ local function isUnicycle(vid)
   return d ~= nil and d.mainPartName == 'unicycle'
 end
 
--- the rig this frame: the world, or the player's car with this frame's pose (on foot there is no car to ride)
+-- ---------------------------------------------- TSS Cam: camera modes, car controls, phone commands
+-- Camera modes: hand (the world), ride (ride with the car, as you hold it), hood / passenger / chase / drone (ride
+-- with the car from that mount), lockon (handheld, always looking at the car). The camera can follow any car
+-- (followVid) without taking control of it: the player keeps driving their own (docs/research/beamng-apis.md s8).
+local tsc = require('tssHandcam/tsc')
+local control = require('tssHandcam/control')
+local MODES = { 'hand', 'ride', 'hood', 'passenger', 'chase', 'drone', 'lockon' }
+local MODE_SET, RIDE = {}, { ride = true, hood = true, passenger = true, chase = true, drone = true }
+for _, m in ipairs(MODES) do MODE_SET[m] = true end
+local camMode, pendingMount, followVid = 'hand', nil, nil
+local sticks, sticksAge = nil, 99
+local carState, carStateVid = {}, nil
+local capsRev, capsTimer, stateTimer, hornTimer, tscCount = 0, 0, 0, 0, 0
+local lockLook = nil
+local hidUi = false -- we hid the UI (film clean / the phone's clean button) and must bring it back
+
+local stickFloats = ffi.new('float[4]')
+local function toFloats(p) ffi.copy(stickFloats, p, 16) return stickFloats[0], stickFloats[1], stickFloats[2], stickFloats[3] end
+local function sendRaw(s) if udp then pcall(function() udp:sendto(s, '127.0.0.1', BRIDGE_PORT) end) end end
+local function sendJson(magic, t)
+  local ok, s = pcall(jsonEncode, t)
+  if ok and type(s) == 'string' then sendRaw(tsc.encode(magic, s)) end
+end
+
+-- the car the camera is about: the one picked on the phone, else the player's
+local function targetVeh()
+  if followVid then
+    local o = getObjectByID and getObjectByID(followVid)
+    if o then return o, followVid end
+    followVid = nil
+  end
+  local veh = getPlayerVehicle and getPlayerVehicle(0)
+  if veh then return veh, veh:getId() end
+  return nil, nil
+end
+
+local function carList()
+  local list = {}
+  if not be then return list end
+  for i = 0, be:getObjectCount() - 1 do
+    local o = be:getObject(i)
+    if o and o:getActive() and o.playerUsable ~= false and not isUnicycle(o:getId()) then list[#list + 1] = o end
+  end
+  return list
+end
+
+local function carName(veh)
+  local jb = veh and veh:getJBeamFilename() or ''
+  local ok, m = pcall(function() return core_vehicles.getModel(jb).model end)
+  if ok and type(m) == 'table' and m.Name then return (m.Brand and (m.Brand .. ' ') or '') .. m.Name end
+  return jb
+end
+
+local function sendCaps()
+  local veh, vid = targetVeh()
+  local vd = vid and core_vehicle_manager.getVehicleData(vid)
+  local tr = translateLanguage and function(k) return translateLanguage(k, k) end
+  local rs = core_replay and core_replay.state or {}
+  capsRev = capsRev + 1
+  sendJson(tsc.CAPS, {
+    rev = capsRev, car = veh and carName(veh) or '', vid = vid or -1, followingOther = followVid ~= nil,
+    cars = #carList(), engaged = engaged, frozen = frozen, camMode = camMode, modes = MODES,
+    controls = vd and vd.vdata and control.controls(vd.vdata, tr, carStateVid == vid and carState or nil) or {},
+    time = simTimeAuthority and simTimeAuthority.get() or 1, paused = simTimeAuthority and simTimeAuthority.getPause() or false,
+    replay = { state = rs.state or 'inactive', pos = rs.positionSeconds or 0, total = rs.totalSeconds or 0,
+               speed = rs.speed or 1, paused = rs.paused or false },
+    clean = hidUi,
+  })
+end
+
+local function answer(seq, ok, err) sendJson(tsc.ANSWER, { seq = seq, ok = ok and true or false, err = err or '' }) end
+
+local function cycleCar(step)
+  local list = carList()
+  if #list == 0 then return false, 'no cars' end
+  local _, cur = targetVeh()
+  local idx = 1
+  for i, o in ipairs(list) do if o:getId() == cur then idx = i end end
+  local nxt = list[((idx - 1 + step) % #list) + 1]
+  local player = getPlayerVehicle and getPlayerVehicle(0)
+  followVid = (player and nxt:getId() == player:getId()) and nil or nxt:getId()
+  pendingMount = camMode -- put the camera on the new car
+  return true
+end
+
+local commands = {}
+commands['car'] = function(a)
+  if core_replay and core_replay.state and core_replay.state.state == 'playback' then
+    return false, 'car controls are off during a replay'
+  end
+  local veh, vid = targetVeh()
+  if not veh then return false, 'no car' end
+  local vd = core_vehicle_manager.getVehicleData(vid)
+  local lua, err = control.luaFor(a.id, a, vd and vd.vdata)
+  if not lua then return false, err end
+  veh:queueLuaCommand(lua)
+  if a.id == 'horn' then hornTimer = (a.down == false) and 0 or 3 end -- a lost "up" can't leave it blaring
+  stateTimer = 0.15
+  return true
+end
+commands['cam.toggle'] = function() M.toggle() return true end
+commands['cam.engage'] = function() M.engage() return engaged, errorText end
+commands['cam.release'] = function() M.release() return true end
+commands['cam.recenter'] = function() M.recenter() return true end
+commands['cam.freeze'] = function() M.freeze() return true end
+commands['cam.mode'] = function(a)
+  if not MODE_SET[a.mode] then return false, 'unknown camera mode' end
+  camMode, pendingMount, lockLook = a.mode, a.mode, nil
+  return true
+end
+commands['car.next'] = function() return cycleCar(1) end
+commands['car.prev'] = function() return cycleCar(-1) end
+commands['car.player'] = function() followVid, pendingMount = nil, camMode return true end
+commands['time'] = function(a) -- live slow motion (lua/ge/simTimeAuthority.lua: 0.001..1, no fast motion live)
+  local s = tonumber(a.speed)
+  if not (simTimeAuthority and s) then return false, 'no time control' end
+  simTimeAuthority.set(math.max(0.001, math.min(1, s)))
+  return true
+end
+commands['pause'] = function() if not simTimeAuthority then return false end simTimeAuthority.togglePause() return true end
+commands['replay'] = function(a)
+  if not core_replay then return false, 'no replays' end
+  local op, val = a.op, tonumber(a.value)
+  if op == 'toggle' then core_replay.togglePlay()
+  elseif op == 'stop' then core_replay.stop()
+  elseif op == 'seek' and val then core_replay.seek(math.max(0, math.min(1, val)))
+  elseif op == 'jump' and val then core_replay.jumpTime(val)
+  elseif op == 'speed' and val then core_replay.setSpeed(math.max(0.001, math.min(8, val)))
+  else return false, 'unknown replay op' end
+  return true
+end
+commands['clean'] = function(a)
+  if not ui_visibility then return false, 'no UI control' end
+  local on = a.on
+  if on == nil then on = not hidUi end
+  if on and ui_visibility.get() then ui_visibility.set(false) hidUi = true
+  elseif not on and hidUi then ui_visibility.set(true) hidUi = false end
+  return true
+end
+
+handleTsc = function(d)
+  local magic, payload = tsc.decode(d)
+  if not magic then return end
+  tscCount = tscCount + 1
+  if magic == tsc.STICKS then
+    local s = tsc.sticks(payload, toFloats)
+    if s then sticks, sticksAge = s, 0 end
+  elseif magic == tsc.COMMAND then
+    local ok, msg = pcall(jsonDecode, payload)
+    if not ok or type(msg) ~= 'table' then return end
+    local seq, fn = tonumber(msg.seq) or 0, commands[msg.cmd]
+    if not fn then answer(seq, false, 'unknown command ' .. tostring(msg.cmd)) return end
+    local okc, res, err = pcall(fn, type(msg.args) == 'table' and msg.args or {})
+    if okc then answer(seq, res, err) else answer(seq, false, tostring(res)) end
+    capsTimer = math.min(capsTimer, 0.1) -- the phone sees the change soon
+  end
+end
+
+local function linkTick(dt)
+  sticksAge = sticksAge + dt
+  if hornTimer > 0 then
+    hornTimer = hornTimer - dt
+    if hornTimer <= 0 then
+      local veh = targetVeh()
+      if veh then veh:queueLuaCommand('electrics.horn(false)') end
+    end
+  end
+  if not bridgeUp() then return end
+  stateTimer = stateTimer - dt
+  if stateTimer <= 0 then
+    stateTimer = 0.5
+    local veh = targetVeh()
+    if veh then veh:queueLuaCommand(control.STATE_LUA) end
+  end
+  capsTimer = capsTimer - dt
+  if capsTimer <= 0 then
+    capsTimer = 1
+    sendCaps()
+  end
+end
+
+function M.onCarState(vid, lights, hazard, sl, sr, fog, lightbar, pb, engine) -- from the car's own Lua
+  carStateVid = vid
+  carState = { lights = lights, hazard = hazard, signalL = sl, signalR = sr, fog = fog, lightbar = lightbar,
+               parkbrake = pb, engine = engine }
+end
+
+-- a mount point on a car, in the world: the node of one of its cameras (core/camera.lua: getCameraDataById,
+-- cameraModes/onboard.lua:70-72 for the formula)
+local function camNode(veh, vid, name)
+  local ok, cd = pcall(function() return core_camera.getCameraDataById(vid) end)
+  local c = ok and cd and cd[name]
+  if not (c and c.camNodeID) then return nil end
+  local x, y, z = veh:getPositionXYZ()
+  local nx, ny, nz = veh:getNodePositionXYZ(c.camNodeID)
+  if not (x and nx) then return nil end
+  return v(x + nx, y + ny, z + nz)
+end
+
+-- where a mode puts the camera (world pos, look, up), or nil to keep the view as it is
+local function mountWorld(mode, veh, vid, F)
+  if not veh then return nil end
+  local f, u, r, o = F.f, F.u, F.r, F.o
+  local function at(df, dr, du) return rig.add(o, rig.add(rig.scale(f, df), rig.add(rig.scale(r, dr), rig.scale(u, du)))) end
+  if mode == 'hood' then
+    return camNode(veh, vid, 'onboard.hood') or at(1.2, 0, 1.1), rig.normalize(rig.sub(f, rig.scale(u, 0.06)), f), u
+  elseif mode == 'passenger' then
+    local ok, _, rhd = pcall(function() return core_camera.getDriverDataById(vid) end)
+    local seat = (ok and rhd) and 'occupant.FL' or 'occupant.FR'
+    return camNode(veh, vid, seat) or at(0, (ok and rhd) and -0.45 or 0.45, 0.9), f, u
+  elseif mode == 'chase' then
+    local p = at(-6, 0, 1.8)
+    return p, rig.normalize(rig.sub(at(0, 0, 0.8), p), f), u
+  elseif mode == 'drone' then
+    local p = at(-8, 0, 5)
+    return p, rig.normalize(rig.sub(at(0, 0, 0.5), p), f), u
+  end
+  return nil
+end
+
+-- the rig this frame: the world, or the followed car with this frame's pose (on foot there is no car to ride)
 local function currentRig(data)
-  if not cfg.followCar then return rig.WORLD, 'world' end
-  local veh = data.veh
-  if not veh or veh == 0 or isUnicycle(data.vid) then return rig.WORLD, 'world' end
+  local veh, vid = data.veh, data.vid
+  if followVid then
+    local o = getObjectByID and getObjectByID(followVid)
+    if o then veh, vid = o, followVid else followVid = nil end
+  end
+  if not (RIDE[camMode] or cfg.followCar) then return rig.WORLD, 'world', veh, vid end
+  if not veh or veh == 0 or isUnicycle(vid) then return rig.WORLD, 'world', veh, vid end
   local fwd, up = t3(veh:getDirectionVector()), t3(veh:getDirectionVectorUp())
   if not cfg.followTilt then
     fwd = rig.horizontal(fwd) or rig.Y
     up = rig.Z
   end
-  return rig.frame(t3(data.vehPos), fwd, up), 'car'
+  local pos = (veh == data.veh) and t3(data.vehPos) or t3(veh:getPosition()) -- the player's car: this frame's pose
+  return rig.frame(pos, fwd, up), 'car', veh, vid
 end
 
 local function buildAnchor()
@@ -308,7 +540,7 @@ function M.cameraUpdate(data)
   local dt = math.max(1e-4, data.dtReal or data.dt or 1 / 60)
   fps = fps + (1 / dt - fps) * 0.05
 
-  local F, mode = currentRig(data)
+  local F, mode, tveh, tvid = currentRig(data)
   if rigMode ~= nil and mode ~= rigMode then
     -- follow-car switched on or off while filming: carry the view over unchanged
     if cur then
@@ -319,6 +551,17 @@ function M.cameraUpdate(data)
     needAnchor, anchor0, groundPrev = true, nil, nil
   end
   rigF, rigMode = F, mode
+
+  -- a camera mode or another car was picked on the phone: start from that mount (the phone moves on from there)
+  if pendingMount and sample then
+    local wp, wl, wu = mountWorld(pendingMount, tveh, tvid, F)
+    if wp then
+      local l, u = rig.orthonormal(rig.fromWorldDir(F, wl), rig.fromWorldDir(F, wu))
+      cur = { pos = rig.fromWorld(F, wp), look = l, up = u }
+      needAnchor, anchor0, groundPrev = true, nil, nil
+    end
+    pendingMount = nil
+  end
 
   if not sample then -- nothing from the phone yet: keep the game's view
     setRes(data, orig.pos, orig.look, orig.up, orig.fov)
@@ -342,6 +585,18 @@ function M.cameraUpdate(data)
   if speed > 0 then
     anchor.pos = rig.add(anchor.pos, rig.scale(walkVel, dt))
     bobPhase = (bobPhase + 2 * math.pi * rig.cadence(speed) * dt) % (4 * math.pi)
+  end
+
+  -- the phone's thumbsticks (seated filming): lift moves the rig up and down, look turns it about the camera
+  if sticks and sticksAge < STICK_TIMEOUT and not frozen then
+    local k = sticks.speed > 0 and sticks.speed or 1
+    if math.abs(sticks.lift) > 0.05 then anchor.pos = rig.add(anchor.pos, v(0, 0, sticks.lift * 1.5 * k * dt)) end
+    if math.abs(sticks.lookX) > 0.05 then
+      local camPos = rig.toRig(anchor, sample)
+      local a, f = -sticks.lookX * math.rad(90) * k * dt, anchor.fwd
+      anchor.fwd = rig.normalize(v(f.x * math.cos(a) - f.y * math.sin(a), f.x * math.sin(a) + f.y * math.cos(a), 0), f)
+      anchor.pos = rig.sub(camPos, rig.dir(anchor, sample.p)) -- turn about the camera, not the rig's origin
+    end
   end
 
   local tpos, tlook, tup = rig.toRig(anchor, sample)
@@ -380,9 +635,18 @@ function M.cameraUpdate(data)
     showUp = rig.normalize(rig.add(rig.scale(cur.up, math.cos(roll)), rig.scale(rig.cross(cur.look, cur.up), math.sin(roll))), cur.up)
   end
 
-  setRes(data, rig.toWorld(rigF, showPos), rig.toWorldDir(rigF, cur.look), rig.toWorldDir(rigF, showUp), curFov)
+  local wPos, wLook, wUp = rig.toWorld(rigF, showPos), rig.toWorldDir(rigF, cur.look), rig.toWorldDir(rigF, showUp)
+  local warp = { rig.viewRotation(tlook, tup, cur.look, showUp) }
+  if camMode == 'lockon' and tveh and tveh ~= 0 then -- the phone moves the camera, the car stays in frame
+    local tx, ty, tz = tveh:getPositionXYZ()
+    local to = rig.normalize(v(tx - wPos.x, ty - wPos.y, tz + 0.5 - wPos.z), wLook)
+    lockLook = lockLook and rig.normalize(rig.lerp(lockLook, to, rig.smoothK(dt, 0.12)), to) or to
+    wLook, wUp = rig.orthonormal(lockLook, rig.Z)
+    warp = nil -- the view no longer follows the phone's rotation: no timewarp rotation to report
+  end
+  setRes(data, wPos, wLook, wUp, curFov)
   appliedCount = appliedCount + 1
-  writeView(not frozen and sample.state == 1, curFov, sample.heartbeat, { rig.viewRotation(tlook, tup, cur.look, showUp) })
+  writeView(not frozen and sample.state == 1, curFov, sample.heartbeat, warp)
   return true
 end
 
@@ -439,7 +703,6 @@ function M.toggle() if engaged then M.release() else M.engage() end end
 
 -- film clean: filming with the HUD and every ImGui window hidden (the game's own Alt+U, ui/visibility.lua), and
 -- everything back when filming stops. Only what we hid comes back: if the UI was already off, it stays off.
-local hidUi = false
 function M.toggleClean()
   if engaged then
     M.release()
@@ -547,6 +810,7 @@ local function onUpdate(dtReal)
     if M._retry <= 0 then M._retry = 2 openSocket() end
   end
   updateSample(dt)
+  linkTick(dt)
   if engaged and core_camera.getActiveGlobalCameraName() ~= CAM_NAME then
     engaged = false -- another camera was picked: leave the game in it
     M.restoreUi()

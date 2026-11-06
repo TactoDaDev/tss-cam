@@ -83,6 +83,8 @@ end }
 function __require(name) -- the extension's require (run_tests.py renames it in tools/.build_ext.lua)
   if name == "ffi" then return fakeFfi end
   if name == "tssHandcam/rig" then return rig end
+  if name == "tssHandcam/tsc" then return realRequire("../mod/tss_handcam/lua/common/tssHandcam/tsc") end
+  if name == "tssHandcam/control" then return realRequire("../mod/tss_handcam/lua/common/tssHandcam/control") end
   error("unexpected require " .. tostring(name))
 end
 
