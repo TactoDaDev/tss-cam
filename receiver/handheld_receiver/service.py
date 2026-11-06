@@ -161,6 +161,7 @@ class ReceiverService:
         self._frames_sent = 0
         self._frames_no_pose = 0
         self.live = LiveView(settings.liveview, self._on_video_frame)
+        self.extra_handler = None  # TSS Cam: callable(data, addr, sock) for TSC* datagrams
 
     # ----------------------------------------------------------- lifecycle
     def start(self) -> None:
@@ -310,6 +311,10 @@ class ReceiverService:
 
     def _handle_datagram(self, data: bytes, addr: tuple[str, int], now: float, sock: socket.socket | None) -> None:
         t0 = time.perf_counter()
+        # TSS Cam: our own TSC* packets (hello, commands, sticks) go to the hub; poses stay AcHandCam's
+        if self.extra_handler is not None and data[:3] == b"TSC":
+            self.extra_handler(data, addr, sock)
+            return
         try:
             pkt = decode_pose(data)
         except PacketError as e:

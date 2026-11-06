@@ -5,3 +5,6 @@ build/
 dist/
 *.ipa
 .DS_Store
+receiver/logs/
+receiver/config.json
+receiver/recordings/
