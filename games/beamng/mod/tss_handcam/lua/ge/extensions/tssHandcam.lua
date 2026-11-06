@@ -288,11 +288,16 @@ local function carList()
   return list
 end
 
+-- getModel reads the vehicle's info files (and logs every broken mod json it meets): once per model, cached
+local carNames = {}
 local function carName(veh)
   local jb = veh and veh:getJBeamFilename() or ''
+  if carNames[jb] then return carNames[jb] end
   local ok, m = pcall(function() return core_vehicles.getModel(jb).model end)
-  if ok and type(m) == 'table' and m.Name then return (m.Brand and (m.Brand .. ' ') or '') .. m.Name end
-  return jb
+  local name = jb
+  if ok and type(m) == 'table' and m.Name then name = (m.Brand and (m.Brand .. ' ') or '') .. m.Name end
+  carNames[jb] = name
+  return name
 end
 
 local function sendCaps()
@@ -441,11 +446,17 @@ local function camNode(veh, vid, name)
   return v(x + nx, y + ny, z + nz)
 end
 
--- where a mode puts the camera (world pos, look, up), or nil to keep the view as it is
-local function mountWorld(mode, veh, vid, F)
-  if not veh then return nil end
-  local f, u, r, o = F.f, F.u, F.r, F.o
+-- where a mode puts the camera (world pos, look, up), or nil to keep the view as it is. In the car's own axes, so it
+-- works whatever the camera rig is (lock-on films from the world, the others ride the car).
+local function mountWorld(mode, veh, vid)
+  if not veh or veh == 0 then return nil end
+  local f, u = t3(veh:getDirectionVector()), t3(veh:getDirectionVectorUp())
+  local r, o = rig.normalize(rig.cross(f, u), rig.X), t3(veh:getPosition())
   local function at(df, dr, du) return rig.add(o, rig.add(rig.scale(f, df), rig.add(rig.scale(r, dr), rig.scale(u, du)))) end
+  if mode == 'lockon' then -- step out and stand a few metres off the front corner, facing the car
+    local p = at(4, 3, 1.3)
+    return p, rig.normalize(rig.sub(at(0, 0, 0.5), p), f), rig.Z
+  end
   if mode == 'hood' then
     return camNode(veh, vid, 'onboard.hood') or at(1.2, 0, 1.1), rig.normalize(rig.sub(f, rig.scale(u, 0.06)), f), u
   elseif mode == 'passenger' then
@@ -554,7 +565,7 @@ function M.cameraUpdate(data)
 
   -- a camera mode or another car was picked on the phone: start from that mount (the phone moves on from there)
   if pendingMount and sample then
-    local wp, wl, wu = mountWorld(pendingMount, tveh, tvid, F)
+    local wp, wl, wu = mountWorld(pendingMount, tveh, tvid)
     if wp then
       local l, u = rig.orthonormal(rig.fromWorldDir(F, wl), rig.fromWorldDir(F, wu))
       cur = { pos = rig.fromWorld(F, wp), look = l, up = u }
@@ -637,7 +648,7 @@ function M.cameraUpdate(data)
 
   local wPos, wLook, wUp = rig.toWorld(rigF, showPos), rig.toWorldDir(rigF, cur.look), rig.toWorldDir(rigF, showUp)
   local warp = { rig.viewRotation(tlook, tup, cur.look, showUp) }
-  if camMode == 'lockon' and tveh and tveh ~= 0 then -- the phone moves the camera, the car stays in frame
+  if (camMode == 'lockon' or camMode == 'drone') and tveh and tveh ~= 0 then -- the phone moves the camera, the car stays in frame
     local tx, ty, tz = tveh:getPositionXYZ()
     local to = rig.normalize(v(tx - wPos.x, ty - wPos.y, tz + 0.5 - wPos.z), wLook)
     lockLook = lockLook and rig.normalize(rig.lerp(lockLook, to, rig.smoothK(dt, 0.12)), to) or to
