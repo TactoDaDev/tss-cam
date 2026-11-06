@@ -1,5 +1,5 @@
 // The camera app. TSS Cam's own look (same as the receiver window): a viewfinder over the camera feed (corner
-// brackets, focus box, thin overlays), race livery (navy / sky / red stripes, slanted red tally, heavy italic
+// brackets, focus box, thin overlays), race livery (slanted red tally, heavy italic
 // race-number readouts) and glass (translucent capsules, a white shutter with a ring).
 import ARKit
 import SwiftUI
@@ -184,7 +184,6 @@ struct ContentView: View {
 
     private var shutterRow: some View {
         ZStack {
-            LiveryStripes().frame(width: 120, height: 70).offset(x: -120).opacity(0.85).allowsHitTesting(false)
             HStack {
                 roundButton("scope", "RECENTER") { model.recenter() }
                 Spacer()
@@ -205,17 +204,6 @@ struct ContentView: View {
                     .overlay(Circle().stroke(Color.white.opacity(0.16)))
                 Text(label).font(.race(10)).tracking(0.8)
             }.foregroundStyle(Color.white)
-        }
-    }
-}
-
-/// Three slanted livery stripes: navy, sky, red.
-struct LiveryStripes: View {
-    var body: some View {
-        HStack(spacing: 0) {
-            Slant(lean: 22).fill(Livery.navy).frame(width: 46)
-            Slant(lean: 22).fill(Livery.sky).frame(width: 22).offset(x: -10)
-            Slant(lean: 22).fill(Livery.red).frame(width: 14).offset(x: -20)
         }
     }
 }

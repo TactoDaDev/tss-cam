@@ -1,6 +1,6 @@
 /* TSS Cam: viewfinder + race livery + glass.
    - Viewfinder: the game fills the window; thin floating overlays, corner brackets, a focus box, soft shades.
-   - Livery: navy / sky / red diagonal stripes as the brand mark, slanted tally and labels, heavy italic readouts.
+   - Livery: slanted tally and labels, heavy italic race-number readouts (no stripes: the user removed them).
    - Glass: the game menu is a floating rounded glass card; the primary key is white with a ring.
    Idle draws ~0 frames: the timecode ticks only while the phone is live; no blur filters (the glass is a dark
    translucent fill, not backdrop-filter). */
@@ -27,13 +27,6 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .monitor::after { content: ""; position: absolute; inset: 0; pointer-events: none;
   background: linear-gradient(180deg, rgba(5,6,8,0.7) 0%, transparent 16%, transparent 52%, rgba(5,6,8,0.92) 100%),
               linear-gradient(90deg, transparent 55%, rgba(5,6,8,0.55) 100%); }
-
-/* livery: three slanted stripes running down the right side of the picture */
-.livery { position: absolute; top: 0; bottom: 86px; right: 352px; width: 230px; pointer-events: none; z-index: 1; }
-.livery i { position: absolute; top: 0; bottom: 0; transform: skewX(-16deg); transform-origin: bottom; }
-.livery i:nth-child(1) { left: 0; width: 64px; background: rgba(13,42,92,0.82); }
-.livery i:nth-child(2) { left: 64px; width: 26px; background: rgba(47,139,220,0.85); }
-.livery i:nth-child(3) { left: 90px; width: 16px; background: rgba(232,32,42,0.9); }
 
 /* viewfinder marks */
 .guides { position: absolute; inset: 72px 380px 96px 40px; pointer-events: none; z-index: 2; }
@@ -85,7 +78,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .row.active { background: linear-gradient(90deg, rgba(232,32,42,0.28), rgba(232,32,42,0.04)); border-color: rgba(232,32,42,0.45); }
 .row.active .caret { color: var(--red); }
 .thumb { width: 48px; height: 28px; border-radius: 6px; background: #1c1f26 center/cover no-repeat; border: 1px solid var(--line); }
-.thumb.auto { background: linear-gradient(110deg, var(--navy) 0 45%, var(--sky) 45% 62%, var(--red) 62% 76%, #1c1f26 76%); }
+.thumb.auto { background: radial-gradient(120% 140% at 20% 10%, rgba(232,32,42,0.55), transparent 65%), #1c1f26; }
 .row .val { font: 600 10px var(--mono); color: var(--dim); letter-spacing: 0.08em; font-style: normal; }
 .row .val.ok { color: var(--text); }
 .row .val.warn { color: var(--amber); }
