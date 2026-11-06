@@ -1,0 +1,7 @@
+ref/
+__pycache__/
+*.pyc
+build/
+dist/
+*.ipa
+.DS_Store
