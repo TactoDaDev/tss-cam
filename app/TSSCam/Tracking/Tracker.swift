@@ -22,7 +22,7 @@ final class Tracker: NSObject, ARSessionDelegate {
 
     func start() {
         guard Tracker.supported else {
-            log("ARKit world tracking isn't available on this device")
+            appLog("ARKit world tracking isn't available on this device")
             return
         }
         let cfg = ARWorldTrackingConfiguration()
@@ -34,7 +34,7 @@ final class Tracker: NSObject, ARSessionDelegate {
         session.delegate = self
         session.run(cfg, options: running ? [] : [.resetTracking])
         running = true
-        log("tracking started")
+        appLog("tracking started")
     }
 
     func pause() {
@@ -69,13 +69,13 @@ final class Tracker: NSObject, ARSessionDelegate {
     }
 
     func session(_ session: ARSession, didFailWithError error: Error) {
-        log("tracking failed: \(error.localizedDescription)")
+        appLog("tracking failed: \(error.localizedDescription)")
     }
 
-    func sessionWasInterrupted(_ session: ARSession) { log("tracking interrupted") }
+    func sessionWasInterrupted(_ session: ARSession) { appLog("tracking interrupted") }
 
     func sessionInterruptionEnded(_ session: ARSession) {
         epoch &+= 1 // the receiver re-anchors instead of jumping
-        log("tracking resumed (epoch \(epoch))")
+        appLog("tracking resumed (epoch \(epoch))")
     }
 }

@@ -67,13 +67,13 @@ final class Link: ObservableObject {
         params.serviceClass = .interactiveVideo
         let c = NWConnection(host: NWEndpoint.Host(host), port: p, using: params)
         c.stateUpdateHandler = { [weak self] st in
-            log("link: \(st)")
+            appLog("link: \(st)")
             if case .failed(let e) = st { self?.publish { $0.lastError = "\(e)" } }
         }
         c.start(queue: queue)
         conn = c
         receive(c)
-        log("connecting to \(host):\(port)")
+        appLog("connecting to \(host):\(port)")
         publish { $0.status = "Connecting to \(host)…" }
         sayHello()
     }
@@ -128,7 +128,8 @@ final class Link: ObservableObject {
             publish { $0.rttMs = rtt }
             return
         }
-        guard let (magic, obj) = TSC.decodeJSON(d) else { return } // live video (ACHV) comes in phase 5
+        guard let decoded = TSC.decodeJSON(d) else { return } // live video (ACHV) comes in phase 5
+        let (magic, obj) = decoded
         switch magic {
         case TSC.caps:
             let caps = Caps(obj)
@@ -136,11 +137,11 @@ final class Link: ObservableObject {
         case TSC.answer:
             if (obj["ok"] as? Bool) == false {
                 let err = obj["err"] as? String ?? "failed"
-                log("command \(obj["seq"] ?? "?") refused: \(err)")
+                appLog("command \(obj["seq"] ?? "?") refused: \(err)")
                 publish { $0.lastError = err }
             }
         case TSC.hello:
-            log("receiver \(obj["ver"] ?? "?"), game \(obj["game"] ?? "none")")
+            appLog("receiver \(obj["ver"] ?? "?"), game \(obj["game"] ?? "none")")
         default: break
         }
     }

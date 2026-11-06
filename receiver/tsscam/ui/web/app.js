@@ -1,103 +1,105 @@
-// TSS Cam receiver window: polls /api/status twice a second and redraws only what changed.
+// TSS Cam receiver monitor: polls /api/status twice a second; the timecode runs (at 25 fps) only while the phone
+// is live, so an idle window draws nothing.
 'use strict';
 const $ = (id) => document.getElementById(id);
-const GAME_TITLES = { beamng: 'BeamNG.drive', assetto: 'Assetto Corsa' };
-let last = null;
-let ambientFor = null;
+const GAME = { beamng: 'BEAMNG.DRIVE', assetto: 'ASSETTO CORSA' };
+const TITLE = { beamng: 'BeamNG.drive', assetto: 'Assetto Corsa' };
+let liveSince = null, tcTimer = null, imageFor;
 
-function setText(id, text) { const el = $(id); if (el && el.textContent !== text) el.textContent = text; }
-function pill(el, cls, text) {
-  if (!el) return;
-  el.className = el.className.replace(/\b(ok|warn|bad)\b/g, '').trim() + (cls ? ' ' + cls : '');
-  el.textContent = text || '';
-}
+function setText(id, t) { const e = $(id); if (e && e.textContent !== t) e.textContent = t; }
+function cls(el, c, on) { el.classList.toggle(c, !!on); }
 async function post(path, body) {
-  try { await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }); }
-  catch (e) { /* the next poll shows the state */ }
+  try { await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }); } catch (e) {}
   poll();
 }
 
-// The ambient layer: the active game's art drawn into a 64x40 canvas, which CSS stretches (a free blur).
-function ambient(game) {
-  if (game === ambientFor) return;
-  ambientFor = game;
+function timecode() {
+  if (liveSince == null) return setText('timecode', '00:00:00:00');
+  const t = (performance.now() - liveSince) / 1000, f = Math.floor((t % 1) * 25);
+  const p = (n) => String(Math.floor(n)).padStart(2, '0');
+  setText('timecode', `${p(t / 3600)}:${p((t / 60) % 60)}:${p(t % 60)}:${p(f)}`);
+}
+
+function image(game) {
+  if (game === imageFor) return;
+  imageFor = game;
+  $('image').style.backgroundImage = game ? `url(/art/${game}.jpg)` : 'none';
+  // the whole window takes the game's colour: its art in a 64x40 canvas stretched by CSS (a blur that costs nothing)
   const c = $('ambient'), g = c.getContext('2d');
-  g.fillStyle = '#0b0b10'; g.fillRect(0, 0, c.width, c.height);
-  if (!game) return;
-  const img = new Image();
-  img.onload = () => { if (ambientFor === game) { g.drawImage(img, 0, 0, c.width, c.height); g.fillStyle = 'rgba(8,8,12,0.45)'; g.fillRect(0, 0, c.width, c.height); } };
-  img.src = `/art/${game}.jpg`;
+  g.fillStyle = '#0d0e10'; g.fillRect(0, 0, c.width, c.height);
+  if (game) {
+    const img = new Image();
+    img.onload = () => { if (imageFor === game) { g.drawImage(img, 0, 0, c.width, c.height); g.fillStyle = 'rgba(10,10,12,0.5)'; g.fillRect(0, 0, c.width, c.height); } };
+    img.src = `/art/${game}.jpg`;
+  }
 }
 
 function render(s) {
-  const ph = s.phone, gm = s.game;
-  // receiver
-  const rxOk = !!s.listening && !s.listen_error;
-  $('rxDot').className = 'dot ' + (rxOk ? 'ok' : 'bad');
-  setText('rxLabel', rxOk ? 'RECEIVER LISTENING' : 'RECEIVER ERROR');
-  setText('rxLine', rxOk ? `UDP ${s.port} · v${s.version}` : (s.listen_error || 'not listening'));
-  // phone hero
+  const ph = s.phone, gm = s.game, lv = s.live;
+  // tally + timecode
   const live = ph.live;
-  pill($('phonePill'), live ? 'ok' : 'warn', '');
-  $('phonePill').innerHTML = `<span class="dot"></span><span>${live ? 'PHONE LIVE' : 'WAITING FOR THE PHONE'}</span>`;
-  setText('heroTitle', live ? (ph.frozen ? 'Frozen' : ph.walk ? 'Walking' : 'Filming') : 'Open TSS Cam on your phone');
-  setText('heroSub', live
-    ? `${ph.source} · ${ph.rate} Hz · ${ph.latency == null ? '-' : ph.latency + ' ms'} · ${ph.tracking}${ph.app ? ' · app ' + ph.app : ''}`
-    : `Enter ${s.ips[0] || 'this PC\'s address'} in the app. Phone and PC on the same Wi-Fi.`);
-  $('freeze').classList.toggle('on', !!ph.frozen);
-  // game tiles
-  for (const t of document.querySelectorAll('.tile')) {
-    t.classList.toggle('active', t.dataset.mode === gm.mode);
-    const st = t.querySelector('[data-state]');
-    if (st) {
-      const isActive = gm.game === t.dataset.mode;
-      st.textContent = isActive ? (gm.game_connected ? 'Connected' : 'Waiting for the game') : (gm.mode === t.dataset.mode ? 'Selected' : '');
-    }
+  if (live && liveSince == null) liveSince = performance.now();
+  if (!live) liveSince = null;
+  if (live && !tcTimer) tcTimer = setInterval(timecode, 40);
+  if (!live && tcTimer) { clearInterval(tcTimer); tcTimer = null; }
+  timecode();
+  const tally = $('tally');
+  tally.textContent = live ? (ph.frozen ? 'HOLD' : 'LIVE') : (s.listen_error ? 'ERR' : 'STBY');
+  cls(tally, 'live', live && !ph.frozen); cls(tally, 'warn', !!s.listen_error || (live && ph.frozen));
+  setText('tbMode', gm.mode === 'auto' ? (gm.game ? `AUTO · ${GAME[gm.game]}` : 'AUTO') : GAME[gm.mode]);
+
+  // slate
+  const label = $('slateLabel');
+  label.textContent = live ? (ph.frozen ? 'HOLD' : ph.walk ? 'WALK' : 'HANDHELD') : 'STANDBY';
+  cls(label, 'live', live);
+  setText('slateTitle', live ? (gm.car || TITLE[gm.game] || 'Phone live') : (s.listen_error ? 'Receiver error' : 'Waiting for the phone'));
+  setText('slateSub', live ? `${ph.source} · APP ${ph.app || '-'} · ${ph.tracking.toUpperCase()}`
+                           : (s.listen_error || `ENTER ${s.ips[0] || "THIS PC'S ADDRESS"} IN THE APP · SAME WI-FI`));
+  cls($('freeze'), 'on', ph.frozen);
+  image(gm.game);
+  setText('cornerId', gm.game ? (gm.game_connected ? 'LINK OK' : 'NO LINK') : 'A001');
+
+  // menu: game rows
+  for (const r of document.querySelectorAll('.row')) {
+    cls(r, 'active', r.dataset.mode === gm.mode);
+    const v = r.querySelector('[data-state]');
+    if (r.dataset.mode === 'auto') { v.textContent = 'DETECT'; continue; }
+    const running = gm.game === r.dataset.mode;
+    v.textContent = running ? (gm.game_connected ? 'LINKED' : 'NO LINK') : '';
+    v.className = 'val mono' + (running ? (gm.game_connected ? ' ok' : ' warn') : '');
   }
-  setText('gameHint', gm.mode === 'auto' ? (gm.game ? `Auto: ${GAME_TITLES[gm.game]} is running` : 'Auto picks whichever game is running') : 'Fixed game');
-  ambient(gm.game);
-  // connect
-  setText('addr', s.ips.length ? s.ips.join('  ·  ') : 'No network');
+  setText('addr', s.ips.length ? s.ips[0] : 'NO NETWORK');
   setText('port', String(s.port));
-  pill($('fwPill'), s.firewall ? 'ok' : 'warn', s.firewall ? 'FIREWALL OK' : 'FIREWALL?');
-  $('firewall').classList.toggle('hidden', !!s.firewall || live);
-  // car
-  pill($('gamePill'), gm.game_connected ? 'ok' : (gm.game ? 'warn' : ''), gm.game ? (gm.game_connected ? 'LINKED' : 'NOT LINKED') : '');
-  setText('car', gm.car || (gm.game ? GAME_TITLES[gm.game] : 'No game running'));
-  setText('carLine', gm.hook_error || (gm.car ? `${gm.controls} controls on the phone` : (gm.game ? 'Start the game with the TSS Cam mod' : 'Start BeamNG.drive or Assetto Corsa')));
-  // live view
-  const lv = s.live;
-  pill($('livePill'), lv.error ? 'bad' : (lv.running ? 'ok' : ''), lv.error ? 'ERROR' : (lv.running ? 'ON' : ''));
-  setText('liveBig', lv.running ? `${lv.fps} fps · ${lv.mbps} Mbit/s` : 'Off');
-  setText('liveLine', lv.error || (lv.running ? `encoder ${lv.encoder || '-'}` : 'Starts when the phone\'s viewfinder shows the game'));
-  // settings
-  setText('ver', 'v' + s.version);
-  setText('sLoss', ph.loss + ' %');
-  setText('sTrack', ph.tracking || '-');
-  setText('sZoom', ph.zoom + 'x');
-  setText('sCounts', `${gm.counts.command} / ${gm.counts.sticks} / ${gm.counts.bad}`);
-  setText('sListen', s.listening || s.listen_error || '-');
+  const fw = $('fw');
+  fw.textContent = s.firewall ? 'FIREWALL OK' : 'FIREWALL ?';
+  cls(fw, 'warn', !s.firewall);
+  cls($('firewall'), 'hidden', s.firewall || live);
+  setText('car', gm.car || (gm.game ? TITLE[gm.game] : 'No car'));
+  setText('carLine', gm.hook_error ? gm.hook_error.toUpperCase()
+    : gm.car ? `${gm.controls} CONTROLS ON THE PHONE` : (gm.game ? 'START THE GAME WITH THE TSS CAM MOD' : 'START BEAMNG.DRIVE OR ASSETTO CORSA'));
+  setText('liveLine', lv.error ? 'ERROR · ' + lv.error.toUpperCase() : lv.running ? `${lv.fps} FPS · ${lv.mbps} MBIT/S · ${(lv.encoder || '-').toUpperCase()}` : 'OFF');
+
+  // readouts
+  setText('rPhone', live ? 'LIVE' : '--');
+  setText('rRate', live ? `${ph.rate} HZ` : '-- HZ');
+  setText('rLat', ph.latency == null ? '-- MS' : `${ph.latency} MS`);
+  const loss = $('rLoss');
+  loss.textContent = live ? `${ph.loss} %` : '-- %';
+  loss.className = 'v' + (live && ph.loss > 5 ? ' bad' : live && ph.loss > 1 ? ' warn' : '');
+  setText('rLens', `${Math.round(24 * (ph.zoom || 1))}MM`);
+  setText('rTrack', live ? ph.tracking.toUpperCase() : '--');
+  setText('rLink', s.listen_error ? s.listen_error : `UDP ${s.listening || '-'} · ${gm.counts.command} CMD · ${gm.counts.bad} BAD`);
 }
 
 async function poll() {
-  try {
-    const r = await fetch('/api/status', { cache: 'no-store' });
-    last = await r.json();
-    render(last);
-  } catch (e) {
-    setText('rxLabel', 'RECEIVER STOPPED');
-    $('rxDot').className = 'dot bad';
-  }
+  try { render(await (await fetch('/api/status', { cache: 'no-store' })).json()); }
+  catch (e) { const t = $('tally'); t.textContent = 'OFF'; t.className = 'tally warn'; }
 }
 
-for (const t of document.querySelectorAll('.tile')) t.addEventListener('click', () => post('/api/mode', { mode: t.dataset.mode }));
+for (const r of document.querySelectorAll('.row')) r.addEventListener('click', () => post('/api/mode', { mode: r.dataset.mode }));
 $('recenter').addEventListener('click', () => post('/api/recenter'));
 $('freeze').addEventListener('click', () => post('/api/freeze'));
 $('accept').addEventListener('click', () => post('/api/accept_phone'));
 $('firewall').addEventListener('click', () => post('/api/firewall'));
-for (const n of document.querySelectorAll('.nav')) n.addEventListener('click', () => {
-  for (const m of document.querySelectorAll('.nav')) m.classList.toggle('active', m === n);
-  for (const v of document.querySelectorAll('.view')) v.classList.toggle('hidden', v.id !== n.dataset.view);
-});
 poll();
 setInterval(poll, 500);

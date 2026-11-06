@@ -1,0 +1,50 @@
+# XcodeGen project: generated on the CI Mac (there is no Mac here), never committed as .xcodeproj.
+name: TSSCam
+options:
+  bundleIdPrefix: app.tss
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"          # Swift 5 language mode: Swift 6's strict concurrency would fail ARKit delegate code
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    TARGETED_DEVICE_FAMILY: "1"
+targets:
+  TSSCam:
+    type: application
+    platform: iOS
+    sources: [TSSCam]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.tss.cam   # keep fixed: a free Apple ID gets 10 new app IDs a week
+        PRODUCT_NAME: TSSCam
+        INFOPLIST_KEY_CFBundleDisplayName: TSS Cam
+    info:
+      path: TSSCam/Info.plist
+      properties:
+        CFBundleDisplayName: TSS Cam
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSCameraUsageDescription: TSS Cam uses the camera to track how you move the phone.
+        NSLocalNetworkUsageDescription: TSS Cam talks to the TSS Cam receiver on your PC over your Wi-Fi.
+        UIRequiredDeviceCapabilities: [arkit, arm64]
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UILaunchScreen: {}
+        UIStatusBarHidden: true
+        UIRequiresFullScreen: true
+        CADisableMinimumFrameDurationOnPhone: true
+  TSSCamTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [TSSCamTests]
+    dependencies:
+      - target: TSSCam
+schemes:
+  TSSCam:
+    build:
+      targets:
+        TSSCam: all
+        TSSCamTests: [test]
+    test:
+      targets: [TSSCamTests]

@@ -19,4 +19,4 @@ final class AppLog: ObservableObject {
     }
 }
 
-func log(_ text: String) { AppLog.shared.add(text) }
+func appLog(_ text: String) { AppLog.shared.add(text) }
