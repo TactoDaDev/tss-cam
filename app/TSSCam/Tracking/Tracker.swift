@@ -15,6 +15,13 @@ struct TrackedPose {
 final class Tracker: NSObject, ARSessionDelegate {
     let session = ARSession()
     var onPose: ((TrackedPose) -> Void)?
+    /// ARKit's delegate queue: the pose queue, so the main thread (UI) can never delay a pose
+    let queue: DispatchQueue
+
+    init(queue: DispatchQueue) {
+        self.queue = queue
+        super.init()
+    }
     private(set) var epoch: UInt16 = 0
     private(set) var running = false
 
@@ -32,6 +39,7 @@ final class Tracker: NSObject, ARSessionDelegate {
             cfg.videoFormat = best
         }
         session.delegate = self
+        session.delegateQueue = queue
         session.run(cfg, options: running ? [] : [.resetTracking])
         running = true
         appLog("tracking started")
@@ -39,59 +47,33 @@ final class Tracker: NSObject, ARSessionDelegate {
 
     func pause() {
         session.pause()
-        fakeLink?.invalidate()
-        fakeLink = nil
+        fakeTimer?.cancel()
+        fakeTimer = nil
         running = false
     }
 
-    // MARK: fake tracking (CI simulator: no ARKit there) — a smooth slow orbit at the display rate (60 Hz)
-    private var fakeLink: CADisplayLink?
-    private var fakeStart: CFTimeInterval = 0
+    // MARK: fake tracking (CI simulator: no ARKit there): a smooth slow orbit at 60 Hz, on the pose queue like ARKit
+    private var fakeTimer: DispatchSourceTimer?
+    private var fakeStart: TimeInterval = 0
 
     func startFake() {
-        fakeLink?.invalidate()
-        fakeStart = CACurrentMediaTime()
-        let l = CADisplayLink(target: self, selector: #selector(fakeTick))
-        l.preferredFramesPerSecond = 60
-        l.add(to: .main, forMode: .common)
-        fakeLink = l
+        fakeTimer?.cancel()
+        fakeStart = ProcessInfo.processInfo.systemUptime
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now(), repeating: .nanoseconds(16_666_667), leeway: .milliseconds(1))
+        t.setEventHandler { [weak self] in self?.fakeTick() }
+        t.resume()
+        fakeTimer = t
         running = true
         appLog("fake tracking started (60 Hz)")
     }
 
-    @objc private func fakeTick() {
-        let t = Float(CACurrentMediaTime() - fakeStart)
-        let yaw = 0.3 * sin(t * 0.5)
-        let q = simd_quatf(angle: yaw, axis: SIMD3<Float>(0, 1, 0))
-        onPose?(TrackedPose(time: ProcessInfo.processInfo.systemUptime,
-                            position: SIMD3(0.3 * sin(t * 0.4), 1.5, 0.3 * cos(t * 0.4) - 0.3),
+    private func fakeTick() {
+        let now = ProcessInfo.processInfo.systemUptime
+        let t = Float(now - fakeStart)
+        let q = simd_quatf(angle: 0.3 * sin(t * 0.5), axis: SIMD3<Float>(0, 1, 0))
+        onPose?(TrackedPose(time: now, position: SIMD3(0.3 * sin(t * 0.4), 1.5, 0.3 * cos(t * 0.4) - 0.3),
                             orientation: SIMD4(q.imag.x, q.imag.y, q.imag.z, q.real), state: 2, reason: 0))
-    }
-
-    func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        let cam = frame.camera
-        let camToWorld = cam.viewMatrix(for: .portrait).inverse
-        let rot = simd_float3x3(SIMD3(camToWorld.columns.0.x, camToWorld.columns.0.y, camToWorld.columns.0.z),
-                                SIMD3(camToWorld.columns.1.x, camToWorld.columns.1.y, camToWorld.columns.1.z),
-                                SIMD3(camToWorld.columns.2.x, camToWorld.columns.2.y, camToWorld.columns.2.z))
-        let q = simd_quatf(rot).normalized
-        let t = cam.transform.columns.3
-        var state: UInt8 = 0, reason: UInt8 = 0
-        switch cam.trackingState {
-        case .notAvailable: state = 0
-        case .normal: state = 2
-        case .limited(let r):
-            state = 1
-            switch r {
-            case .initializing: reason = 1
-            case .excessiveMotion: reason = 2
-            case .insufficientFeatures: reason = 3
-            case .relocalizing: reason = 4
-            @unknown default: reason = 5
-            }
-        }
-        onPose?(TrackedPose(time: frame.timestamp, position: SIMD3(t.x, t.y, t.z),
-                            orientation: SIMD4(q.imag.x, q.imag.y, q.imag.z, q.real), state: state, reason: reason))
     }
 
     func session(_ session: ARSession, didFailWithError error: Error) {

@@ -52,11 +52,18 @@ final class Link: ObservableObject {
     @Published private(set) var caps: Caps? = nil      // nil: a receiver without TSS Cam's extras (stock AcHandCam)
     @Published private(set) var lastError = ""
 
-    private var conn: NWConnection?
-    private let queue = DispatchQueue(label: "tsscam.link")
+    // shared with the pose queue (poses are sent from there, not from main)
+    let rtt = Locked<Double?>(nil)        // last round trip, ms
+    let hasCaps = Locked(false)           // a TSS Cam receiver answered (sticks are worth sending)
+    private let connBox = Locked<NWConnection?>(nil)
+    private var conn: NWConnection? { connBox.get() }
+    // link-queue state
+    private let queue = DispatchQueue(label: "tsscam.link", qos: .userInteractive)
     private var lastAck = Date.distantPast
-    private var cmdSeq = 0
     private var helloAt = Date.distantPast
+    private var liveState = false
+    private var lastRttPublish = Date.distantPast
+    private var cmdSeq = 0                // main thread
     private(set) var host = ""
 
     func connect(host: String, port: UInt16 = 47820) {
@@ -71,7 +78,7 @@ final class Link: ObservableObject {
             if case .failed(let e) = st { self?.publish { $0.lastError = "\(e)" } }
         }
         c.start(queue: queue)
-        conn = c
+        connBox.set(c)
         receive(c)
         appLog("connecting to \(host):\(port)")
         publish { $0.status = "Connecting to \(host)…" }
@@ -80,7 +87,9 @@ final class Link: ObservableObject {
 
     func disconnect() {
         conn?.cancel()
-        conn = nil
+        connBox.set(nil)
+        hasCaps.set(false)
+        queue.async { self.liveState = false }
         publish { $0.live = false; $0.caps = nil; $0.status = "Not connected" }
     }
 
@@ -114,11 +123,12 @@ final class Link: ObservableObject {
         live = true
         rttMs = 12
         status = "Live"
+        hasCaps.set(true)
         self.caps = Caps(caps)
     }
 
     func sayHello() {
-        helloAt = Date()
+        queue.async { self.helloAt = Date() }
         let info: [String: Any] = ["app": "tsscam", "ver": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"]
         if let d = TSC.encodeJSON(TSC.hello, info) { send(d) }
     }
@@ -129,15 +139,18 @@ final class Link: ObservableObject {
         if let d = TSC.encodeJSON(TSC.command, ["seq": cmdSeq, "cmd": cmd, "args": args]) { send(d) }
     }
 
-    /// Called every frame: hello until the receiver answers with its capabilities, live flag from ack age.
+    /// Called every frame (from the pose queue): hello until the receiver answers with its capabilities, and the
+    /// live flag from the acks' age. Runs on the link queue; the UI only hears about changes.
     func tick() {
-        let now = Date()
-        if caps == nil, now.timeIntervalSince(helloAt) > 2, conn != nil { sayHello() }
-        let isLive = now.timeIntervalSince(lastAck) < 1.0
-        if isLive != live {
-            publish {
-                $0.live = isLive
-                $0.status = isLive ? "Live" : ($0.conn == nil ? "Not connected" : "No answer from \($0.host): same Wi-Fi? Local Network allowed?")
+        queue.async { [weak self] in
+            guard let self else { return }
+            let now = Date()
+            if !self.hasCaps.get(), now.timeIntervalSince(self.helloAt) > 2, self.conn != nil { self.sayHello() }
+            let isLive = now.timeIntervalSince(self.lastAck) < 1.0
+            if isLive != self.liveState {
+                self.liveState = isLive
+                let noAnswer = self.conn == nil ? "Not connected" : "No answer from \(self.host): same Wi-Fi? Local Network allowed?"
+                self.publish { $0.live = isLive; $0.status = isLive ? "Live" : noAnswer }
             }
         }
     }
@@ -152,15 +165,21 @@ final class Link: ObservableObject {
 
     private func handle(_ d: Data) {
         if let ack = Ack.decode(d) {
-            lastAck = Date()
-            let rtt = (ProcessInfo.processInfo.systemUptime - ack.sendTime) * 1000
-            publish { $0.rttMs = rtt }
+            let now = Date()
+            lastAck = now
+            let ms = (ProcessInfo.processInfo.systemUptime - ack.sendTime) * 1000
+            rtt.set(ms)
+            if now.timeIntervalSince(lastRttPublish) > 0.25 { // the UI redraws 4 times a second, not 60
+                lastRttPublish = now
+                publish { $0.rttMs = ms }
+            }
             return
         }
         guard let decoded = TSC.decodeJSON(d) else { return } // live video (ACHV) comes in phase 5
         let (magic, obj) = decoded
         switch magic {
         case TSC.caps:
+            hasCaps.set(true)
             let caps = Caps(obj)
             publish { if $0.caps != caps { $0.caps = caps } }
         case TSC.answer:
