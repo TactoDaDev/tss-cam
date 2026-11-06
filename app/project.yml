@@ -38,6 +38,9 @@ targets:
     type: bundle.unit-test
     platform: iOS
     sources: [TSSCamTests]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES   # a test bundle needs one to be signed for the simulator
     dependencies:
       - target: TSSCam
 schemes:
